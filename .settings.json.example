@@ -1,0 +1,30 @@
+{
+  "default_orgs": [
+    "example-org",
+    "example-org-hris",
+    "example-org-test",
+    "another-org",
+    "example-website"
+  ],
+  "github_pat": "",
+  "_github_pat_note": "Fine-grained PAT — Contents: Read-only + Metadata: Read-only. Required in Fargate; optional locally if using gh CLI.",
+  "gemini_model": "gemini-3.8-flash",
+  "_gemini_model_note": "Gemini model used for package extraction. Override without redeploying via LDE_GEMINI_MODEL env var or PUT /api/settings.",
+  "dtrack_url": "http://localhost:8081",
+  "dtrack_api_key": "",
+  "ort_image": "ghcr.io/oss-review-toolkit/ort:latest",
+  "_ort_image_note": "For TLS-intercepting environments, build the local image with `docker compose --profile build build ort-image` and set ort_image to 'library-dependency-explorer/ort:local'.",
+  "ort_egress_network": "ort-egress",
+  "npm_cache_url": "http://npm-cache:9999",
+  "npm_cache_probe_url": "http://127.0.0.1:9999",
+  "pypi_cache_url": "http://pypi-cache:9998/simple/",
+  "pypi_cache_probe_url": "http://127.0.0.1:9998",
+  "athens_url": "http://athens:3000",
+  "athens_probe_url": "http://127.0.0.1:3000",
+  "enabled_package_managers": [
+    "NPM", "Yarn", "PIP", "Pipenv", "Poetry", "GoMod", "Maven", "Gradle"
+  ],
+  "_enabled_package_managers_note": "Remove 'GoMod' to skip Go analyses (often 15-25 min/repo cold). Same for Maven/Gradle if slow.",
+  "ort_max_workers": 4,
+  "run_retention": 3
+}

@@ -1,0 +1,7 @@
+# BuildKit uses this instead of the root .dockerignore when building
+# Dockerfile.pypicache.  The image only needs cache_server/; certs arrive via
+# the named `certs` build context, never the main context.
+*
+!cache_server/
+**/__pycache__
+**/*.pyc

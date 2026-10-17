@@ -1,0 +1,3 @@
+# Runtime: stdlib only (Python 3.11+).
+# Test deps:
+pytest>=8.0

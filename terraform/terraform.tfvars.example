@@ -1,0 +1,61 @@
+# Copy this to terraform.tfvars and fill in your values.
+# terraform.tfvars is git-ignored — NEVER commit real values.
+#
+# AWS credentials: set AWS_PROFILE in your shell before running terraform commands.
+#   export AWS_PROFILE=your-profile
+
+aws_region = "us-east-1"
+env        = "dev"   # use "prod" for production
+
+lde_domain    = "lde.example.com"
+dtrack_domain = "dtrack.example.com"
+
+# JSON {username: sha256_hex} from `python3 scripts/set_lde_password.py`.
+# Empty uses ~/.lde/basic-auth.json. Plan fails when the file is missing.
+# lde_basic_auth_file = ""
+
+# Route53 hosted zone IDs.
+#
+# The ALB is internal, so A records live in a private hosted zone (route53_zone_id).
+# ACM certificate validation requires a public DNS record — set certificate_zone_id_override
+# to the public hosted zone ID so Terraform puts the ACM CNAME there.
+# If you use a single public zone for everything, set only route53_zone_id and leave
+# certificate_zone_id_override empty ("").
+route53_zone_id              = ""   # private zone — ALB A records
+certificate_zone_id_override = ""   # public zone — ACM DNS validation CNAME
+
+# Required when route53_zone_id is empty. Existing ACM certificate ARNs.
+# The first ARN is the HTTPS listener default. Terraform does not request
+# or validate these. Leave the list empty when a hosted zone is set.
+# listener_certificate_arns = [
+#   "arn:aws:acm:us-east-1:123456789012:certificate/existing-dtrack",
+#   "arn:aws:acm:us-east-1:123456789012:certificate/existing-lde",
+# ]
+
+# Existing VPC to deploy into (this stack does not create a VPC).
+vpc_id             = "vpc-xxxxxxxxxxxxxxxxx"
+public_subnet_ids  = ["subnet-aaaaaaaaaaaaaaaaa", "subnet-bbbbbbbbbbbbbbbbb"]
+# Private subnets when the VPC has them. Otherwise repeat public_subnet_ids.
+# Private subnets when the VPC has them. Otherwise repeat public_subnet_ids.
+# Private subnets when the VPC has them. Otherwise repeat public_subnet_ids.
+# Private subnets when the VPC has them. Otherwise repeat public_subnet_ids.
+private_subnet_ids = ["subnet-ccccccccccccccccc", "subnet-ddddddddddddddddd"]
+ecs_cluster_name   = "your-ecs-cluster"
+
+# The load balancer is internal unless this is false. False gives it public
+# addresses and replaces an existing internal load balancer. Set the allowlist
+# to the client public address as a /32 in that case. DNS-only, not proxied.
+# alb_internal = false
+
+# CIDR ranges allowed to reach the ALB.
+# Internal: VPN or office ranges. Internet-facing: the client public /32.
+alb_ingress_cidr_blocks = ["10.0.0.0/8"]
+
+# ECR image URI — set after first `docker push`, or leave empty to use the
+# repository created by this stack (tagged :latest).
+# lde_image = "<account-id>.dkr.ecr.us-east-1.amazonaws.com/dev-lde:<git-sha>"
+
+# Aurora Serverless v2 capacity (0.5 ACU minimum ≈ 1 GB RAM, suitable for dev).
+# Billed per ACU-hour at the current capacity; see docs/aws-cost-control.md.
+db_instance_class = 0.5
+db_max_acus       = 4

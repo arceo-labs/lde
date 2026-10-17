@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "library-dependency-explorer"
+version = "0.1.0"
+description = "Index every dependency across your GitHub organizations — without cloning a repository."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "The Library Dependency Explorer Authors" }]
+keywords = ["sbom", "dependency-track", "cyclonedx", "spdx", "supply-chain", "security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+# Runtime uses the Python standard library only — no third-party dependencies.
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+docs = ["mkdocs==1.6.1"]
+
+[tool.setuptools]
+# This is an application, not an importable library. Declare the entry module
+# and the backend package explicitly so setuptools auto-discovery does not try
+# to package tests/ or terraform/. cache_server/ runs as standalone processes
+# (not imported by the app) and is intentionally not packaged here.
+py-modules = ["server"]
+packages = ["backend"]
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e: end-to-end tests that drive the real pipeline (require a running server + Dependency-Track; opt in via `-m e2e` and set LDE_E2E_ORG)",
+]

@@ -1,0 +1,59 @@
+# Extends the official Athens Go-module proxy with corporate-proxy root
+# CAs so its outbound HTTPS to proxy.golang.org + VCS hosts (github.com,
+# cloud.google.com, etc.) validates the proxy-intercepted chain.
+#
+# Athens already handles the cross-repo / cross-run module caching plus
+# VCS-fallback retries for modules that proxy.golang.org doesn't have —
+# the latter is the case `go list -m -json all` keeps failing on
+# directly, because direct mode requires DNS+TLS to arbitrary hosts.
+#
+# Usage: docker compose build athens
+#        docker compose up -d athens
+
+FROM gomods/athens:latest
+
+USER root
+
+# `certs` is a named build context (additional_contexts in docker-compose.yml),
+# bind-mounted for the RUN below only: just its *.crt files are copied into the
+# image, so stray keys or other files in certs/ never reach a layer.  The build
+# succeeds with no .crt files present.
+#
+# Bootstrap chicken-and-egg: installing `ca-certificates` requires
+# HTTPS to the package repo, but HTTPS is what's currently broken
+# because the corporate proxy CA isn't trusted yet. Switch the repo URLs to
+# plain HTTP for the install step — the downloaded packages are signed
+# by the distro's own keys, so transport TLS isn't load-bearing for
+# package integrity. Restore HTTPS afterwards so the image is hygienic.
+RUN --mount=type=bind,from=certs,target=/tmp/certs \
+    set -eux; \
+    if command -v apk >/dev/null 2>&1; then \
+        sed -i 's|^https:|http:|g' /etc/apk/repositories 2>/dev/null || true; \
+        apk add --no-cache ca-certificates; \
+        sed -i 's|^http:|https:|g' /etc/apk/repositories 2>/dev/null || true; \
+        mkdir -p /usr/local/share/ca-certificates; \
+        find /tmp/certs -maxdepth 1 -type f -name '*.crt' -exec cp {} /usr/local/share/ca-certificates/ \; ; \
+        update-ca-certificates; \
+    elif command -v apt-get >/dev/null 2>&1; then \
+        # Debian's apt-get over plain http to security.debian.org/etc.
+        # is fine for this purpose for the same reason (signed packages).
+        sed -i 's|https://|http://|g' /etc/apt/sources.list 2>/dev/null || true; \
+        find /etc/apt/sources.list.d -name '*.list' -exec sed -i 's|https://|http://|g' {} \; 2>/dev/null || true; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends ca-certificates; \
+        mkdir -p /usr/local/share/ca-certificates; \
+        find /tmp/certs -maxdepth 1 -type f -name '*.crt' -exec cp {} /usr/local/share/ca-certificates/ \; ; \
+        update-ca-certificates; \
+        rm -rf /var/lib/apt/lists/*; \
+    else \
+        echo "no apk or apt-get found; certs may not be trusted" >&2; \
+        exit 1; \
+    fi
+
+# Athens is a Go program; SSL_CERT_FILE points its TLS clients at the
+# now-updated system bundle that includes the corporate proxy intermediate(s).
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_DIR=/etc/ssl/certs
+
+# Athens upstream image runs as uid 1000 by default.
+USER 1000

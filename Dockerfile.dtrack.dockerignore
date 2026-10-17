@@ -1,0 +1,4 @@
+# BuildKit uses this instead of the root .dockerignore when building
+# Dockerfile.dtrack.  The image needs nothing from the main context; certs
+# arrive via the named `certs` build context, never the main context.
+*

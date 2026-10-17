@@ -1,0 +1,60 @@
+# Extends the official OSS Review Toolkit image with corporate-proxy root
+# CAs so the bundled package managers (npm, pip, Maven, Gradle, Go) trust
+# intercepted TLS connections to public registries.
+#
+# Usage: place the exported root CA(s) under ./certs/ as .crt files, then
+#   docker compose --profile build build ort-image
+#
+# Point .settings.json at the resulting tag:
+#   "ort_image": "library-dependency-explorer/ort:local"
+#
+# See README → "Corporate proxy / TLS interception" for the export commands.
+
+FROM ghcr.io/oss-review-toolkit/ort:latest
+
+USER root
+
+# The base image's HOME is /home/ort (owned by uid 1000) but we run as
+# root at runtime with `--cap-drop=ALL`, which strips CAP_DAC_OVERRIDE.
+# Without it, root can't write under directories owned by other uids
+# even if intended. Several tools hardcode `Path.home()/.cache/...`
+# (e.g. python-inspector for ORT's PIP analyzer) and bypass our
+# XDG_CACHE_HOME overrides. Open up /home/ort once at build time so
+# every tool can write there regardless of uid.
+RUN chmod -R go+rwX /home/ort
+
+# Drop the cert(s) into the system trust store. `update-ca-certificates`
+# wires them into /etc/ssl/certs/ca-certificates.crt, which the env vars
+# below point every tool at.
+# `certs` is a named build context (additional_contexts in docker-compose.yml),
+# bind-mounted for the RUN below only: just its *.crt files are copied into the
+# image, so stray keys or other files in certs/ never reach a layer.  The build
+# succeeds with no .crt files present.
+RUN --mount=type=bind,from=certs,target=/tmp/certs \
+    set -eux; \
+    mkdir -p /usr/local/share/ca-certificates; \
+    find /tmp/certs -maxdepth 1 -type f -name '*.crt' -exec cp {} /usr/local/share/ca-certificates/ \; ; \
+    update-ca-certificates; \
+    if [ -n "${JAVA_HOME:-}" ] && [ -f "$JAVA_HOME/lib/security/cacerts" ]; then \
+        for cert in /usr/local/share/ca-certificates/*.crt; do \
+            [ -f "$cert" ] || continue; \
+            alias="corpproxy-$(basename "$cert" .crt)"; \
+            keytool -delete -alias "$alias" \
+                    -keystore "$JAVA_HOME/lib/security/cacerts" \
+                    -storepass changeit 2>/dev/null || true; \
+            keytool -importcert -trustcacerts -noprompt \
+                    -file "$cert" \
+                    -keystore "$JAVA_HOME/lib/security/cacerts" \
+                    -storepass changeit \
+                    -alias "$alias"; \
+        done; \
+    fi
+
+# Node.js, pip/requests, OpenSSL CLI, curl — each tool reads its own env
+# var to locate the CA bundle. /etc/ssl/certs/ca-certificates.crt is the
+# Debian/Ubuntu merged bundle that includes whatever we just added.
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt

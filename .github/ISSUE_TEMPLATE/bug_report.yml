@@ -1,0 +1,51 @@
+name: Bug report
+description: Something in Library Dependency Explorer does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Remove tokens, API keys, passwords and private repository names before posting.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Output of `git rev-parse --short HEAD`, or the release tag.
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Local (python3 server.py)
+        - AWS ECS Fargate
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open Package Search
+        2. Extract from URL https://...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Server output or browser console errors, with secrets removed.
+      render: text

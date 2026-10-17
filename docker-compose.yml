@@ -1,0 +1,160 @@
+# Dependency-Track stack + isolated egress network for transient ORT containers.
+#
+# Usage:
+#   docker compose up -d              # bring up DT
+#   docker compose down               # stop DT (data preserved in named volume)
+#   docker compose down -v            # stop DT and wipe data
+#
+# The `ort-egress` network is created on first `up`. The Python orchestrator
+# attaches each transient ORT container to it via `--network ort-egress`. DT
+# services live on a separate `dtrack-net` and are NOT reachable from ORT
+# containers by service name. The orchestrator talks to DT over the host
+# port (localhost:8081), not via this network.
+#
+# `additional_contexts: certs: ./certs` hands local corporate-proxy root CAs
+# (*.crt) to the image builds. It is a separate build context because
+# .dockerignore excludes certs/ from the main context, which keeps local certs
+# out of the production image. An empty certs/ is fine: builds import nothing.
+
+services:
+  dtrack-apiserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.dtrack
+      additional_contexts:
+        certs: ./certs
+    image: library-dependency-explorer/dtrack-apiserver:local
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    environment:
+      ALPINE_DATABASE_MODE: "external"
+    ports:
+      - "127.0.0.1:8081:8080"
+    networks:
+      - dtrack-net
+    volumes:
+      - dtrack_data:/data
+
+  dtrack-frontend:
+    image: dependencytrack/frontend:latest
+    restart: unless-stopped
+    depends_on:
+      - dtrack-apiserver
+    environment:
+      API_BASE_URL: "http://localhost:8081"
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      - dtrack-net
+
+  # Athens Go module proxy. ORT containers route their `go list -m all`
+  # through this via GOPROXY so cross-repo / cross-run module-graph
+  # walks are served from disk. Crucially, Athens also handles the
+  # VCS-fallback case (modules that proxy.golang.org doesn't have, like
+  # pseudo-versions or retired-module clones) ON ITS OWN — that's the
+  # path that broke today's runs when Go fell back to "direct" mode and
+  # hit proxy DNS/TLS failures for cloud.google.com, github.com, etc.
+  athens:
+    build:
+      context: .
+      dockerfile: Dockerfile.athens
+      additional_contexts:
+        certs: ./certs
+    image: library-dependency-explorer/athens:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - ort-egress
+    volumes:
+      - ./.cache/athens-storage:/var/lib/athens
+    environment:
+      ATHENS_DISK_STORAGE_ROOT: /var/lib/athens
+      ATHENS_STORAGE_TYPE: disk
+      ATHENS_LOG_LEVEL: info
+      ATHENS_NET_INTERFACE: "0.0.0.0"
+      ATHENS_PORT: ":3000"
+
+  # Caching HTTP proxy in front of pypi.org + files.pythonhosted.org.
+  # ORT containers route pip/python-inspector through this via
+  # PIP_INDEX_URL so cross-repo and cross-run PyPI metadata + wheels are
+  # served from disk instead of refetched through the corporate proxy.
+  pypi-cache:
+    build:
+      context: .
+      dockerfile: Dockerfile.pypicache
+      additional_contexts:
+        certs: ./certs
+    image: library-dependency-explorer/pypi-cache:local
+    restart: unless-stopped
+    environment:
+      # The proxy rewrites files.pythonhosted.org URLs in /simple/ HTML
+      # to point at SELF_URL/files/, so pip's follow-up downloads come
+      # back through us. Must match the address ORT containers use.
+      SELF_URL: "http://pypi-cache:9998"
+    ports:
+      - "127.0.0.1:9998:9998"
+    networks:
+      - ort-egress
+    volumes:
+      - ./.cache/pypi-registry:/cache
+
+  # Caching HTTP proxy in front of registry.npmjs.org. ORT and prelock
+  # containers route their npm CLI through this via NPM_CONFIG_REGISTRY,
+  # so cross-repo and cross-run package-metadata fetches are served from
+  # disk instead of re-pulled through the corporate proxy each time.
+  npm-cache:
+    build:
+      context: .
+      dockerfile: Dockerfile.npmcache
+      additional_contexts:
+        certs: ./certs
+    image: library-dependency-explorer/npm-cache:local
+    restart: unless-stopped
+    # Loopback-only port so the orchestrator running on the host can
+    # preflight-probe the service. ORT/prelock containers reach it via
+    # the docker-internal hostname `npm-cache:9999` on ort-egress.
+    ports:
+      - "127.0.0.1:9999:9999"
+    networks:
+      - ort-egress
+    volumes:
+      - ./.cache/npm-registry:/cache
+
+  # Build-only target: produces the ORT image with corporate-proxy root CAs
+  # imported into the system + JVM trust stores. Never started by `up` —
+  # the Python orchestrator invokes ORT via `docker run` per-repo.
+  #
+  # Build: docker compose --profile build build ort-image
+  # Then set ort_image in .settings.json to library-dependency-explorer/ort:local
+  ort-image:
+    profiles: ["build"]
+    build:
+      context: .
+      dockerfile: Dockerfile.ort
+      additional_contexts:
+        certs: ./certs
+    image: library-dependency-explorer/ort:local
+    command: ["true"]
+    restart: "no"
+
+networks:
+  dtrack-net:
+    driver: bridge
+  # External so compose attaches to the SAME `ort-egress` network the
+  # orchestrator launches ORT/prelock containers on (`--network ort-egress`,
+  # bare name). If compose-managed (not external), compose prefixes the
+  # name with the project (e.g. `library-dependency-explorer_ort-egress`),
+  # which becomes a different docker network and breaks DNS resolution of
+  # `npm-cache` from inside ORT/prelock containers.
+  #
+  # The network must exist before `docker compose up` — create it with:
+  #   docker network create ort-egress
+  ort-egress:
+    external: true
+
+volumes:
+  dtrack_data: {}

@@ -1,0 +1,212 @@
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  background: #0f1115;
+  color: #e6e8eb;
+}
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  padding: 12px 24px;
+  background: #181c23;
+  border-bottom: 1px solid #2a2f38;
+}
+header h1 { font-size: 16px; margin: 0; font-weight: 500; }
+header nav a {
+  color: #9aa4b2;
+  text-decoration: none;
+  margin-left: 16px;
+  font-size: 14px;
+}
+header nav a.active { color: #6eb6ff; }
+main {
+  flex: 1 1 auto;
+  overflow: auto;
+  width: 100%;
+  padding: 24px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.site-footer {
+  flex-shrink: 0;
+  padding: 16px 24px;
+  text-align: center;
+  color: #9aa4b2;
+  font-size: 12px;
+  background: #181c23;
+  border-top: 1px solid #2a2f38;
+}
+.site-footer a { color: inherit; text-decoration: underline; }
+
+h2 { font-size: 18px; font-weight: 500; margin: 0 0 16px; }
+
+button {
+  background: #2962ff;
+  color: white;
+  border: none;
+  padding: 8px 14px;
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+}
+button:hover { background: #1e4dcc; }
+button.secondary { background: #2a2f38; color: #e6e8eb; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+input[type="text"], input[type="password"], textarea {
+  background: #181c23;
+  color: #e6e8eb;
+  border: 1px solid #2a2f38;
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 14px;
+  width: 100%;
+}
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #2a2f38; font-size: 14px; }
+th { color: #9aa4b2; font-weight: 500; }
+
+.card {
+  background: #181c23;
+  border: 1px solid #2a2f38;
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.muted { color: #9aa4b2; font-size: 13px; }
+#pkg-count { margin-left: 12px; }
+.pkg-count-num { color: #fff; font-weight: 700; }
+.pager { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.purl-cell { font-size: 0.8em; }
+.gap-below { margin-bottom: 8px; }
+.table-scroll { overflow-x: auto; }
+.tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: #2a2f38;
+  color: #e6e8eb;
+}
+.tag.ok { background: #1f5536; color: #b6f3c8; }
+.tag.warn { background: #5a4514; color: #ffd66e; }
+.tag.fail { background: #5a1a1a; color: #ff9d9d; }
+.tag.running { background: #1e3a8a; color: #b6d4ff; }
+.tag.partial { background: #5a3a14; color: #ffb86e; }
+.tag.stopped { background: #3a3f48; color: #c8cdd5; }
+
+pre.log {
+  background: #0a0c10;
+  padding: 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
+/* Inline drawer row — expands below the clicked repo row in the table */
+tr[data-repo-row] { cursor: pointer; }
+tr[data-repo-row]:hover td { background: #1e2330; }
+tr[data-repo-row] .row-expander { display: inline-block; width: 14px; color: #9aa4b2; transition: transform 0.15s; }
+tr[data-repo-row][data-expanded] .row-expander { transform: rotate(90deg); color: #6eb6ff; }
+
+.drawer-row td {
+  background: #141820;
+  padding: 16px 20px;
+  border-top: 2px solid #2962ff;
+  border-bottom: 2px solid #2962ff;
+}
+.drawer-row h3 { font-size: 15px; font-weight: 500; margin: 0 0 12px; color: #6eb6ff; }
+.drawer-row h4 { font-size: 13px; font-weight: 500; margin: 16px 0 8px; color: #9aa4b2; }
+.drawer-section { margin-bottom: 16px; }
+.drawer-diff { display: flex; gap: 16px; }
+.drawer-diff > div { flex: 1; min-width: 0; }
+.drawer-diff h5 { font-size: 12px; font-weight: 500; margin: 0 0 6px; color: #9aa4b2; }
+
+/* Package search tabs */
+button.primary { background: #2962ff; color: #fff; }
+button.primary:hover { background: #1e4dcc; }
+.tab-btn { background: #2a2f38; color: #9aa4b2; border: 1px solid #2a2f38; }
+.tab-btn:hover { background: #353b46; color: #e6e8eb; }
+.tab-btn.active { background: #1e3a6e; color: #6eb6ff; border-color: #2962ff; }
+
+.visually-hidden,
+.hidden,
+[hidden] {
+  display: none !important;
+}
+
+.toolbar-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+.toolbar-row.compact { margin-bottom: 0; }
+.toolbar-row .grow { flex: 1; }
+.stack-gap { margin-top: 8px; }
+.gap-above-xs { margin-top: 4px; }
+.gap-above { margin-top: 12px; }
+.btn-sm { padding: 2px 8px; font-size: 0.8em; }
+.hint { font-size: 0.85em; }
+.diff-heading { margin: 0 0 6px; }
+.diff-meta { margin: 0 0 10px; }
+
+.fallback-prompt-box { margin-top: 8px; }
+.fallback-prompt-box textarea {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.85em;
+}
+
+.secret-icon {
+  display: inline-block;
+  margin-right: 2px;
+  font-size: 0.9em;
+  opacity: 0.85;
+}
+
+/* Data table used by package search results */
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.data-table th { color: #9aa4b2; font-weight: 500; padding: 6px 10px; border-bottom: 1px solid #2a2f38; text-align: left; }
+.data-table td { padding: 6px 10px; border-bottom: 1px solid #1e2330; vertical-align: top; }
+.data-table tr:last-child td { border-bottom: none; }
+.data-table a { color: #6eb6ff; }
+/* Keep in-table selects (e.g. org branch picker) from overflowing the cell
+   when a branch name is long. */
+.data-table select { max-width: 260px; width: 100%; box-sizing: border-box; }
+
+/* Checkbox / radio rows (run form branch toggle, branch discovery) */
+.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #e6e8eb;
+  cursor: pointer;
+}
+.checkbox-row input[type="checkbox"],
+.checkbox-row input[type="radio"] {
+  width: auto;
+  accent-color: #2962ff;
+  cursor: pointer;
+}
+
+/* Branch discovery org/repo lookup form */
+.branch-discovery-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.branch-discovery-form input[type="text"] { width: auto; flex: 1 1 180px; }

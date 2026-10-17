@@ -1,0 +1,38 @@
+# Extends the official Dependency-Track apiserver with corporate-proxy
+# root CAs (e.g. ZScaler, Netskope, Palo Alto) so the JVM trusts intercepted TLS connections
+# to nvd.nist.gov, osv.dev, github.com, etc.
+#
+# Usage: place the exported root CA(s) under ./certs/ as .crt files, then
+#   docker compose build dtrack-apiserver
+#
+# See README → "Corporate proxy / TLS interception" for the export commands.
+
+FROM dependencytrack/apiserver:latest
+
+USER root
+
+# `certs` is a named build context (see additional_contexts in
+# docker-compose.yml), NOT part of the main context: .dockerignore excludes
+# certs/ so the production image never contains local certs.  It is
+# bind-mounted for this RUN only, so no file from certs/ is written to a layer;
+# only *.crt files are imported into the truststore.  The loop is a no-op when
+# no .crt files exist (fresh clone, no proxy).
+RUN --mount=type=bind,from=certs,target=/tmp/certs \
+    set -eux; \
+    imported=0; \
+    for cert in /tmp/certs/*.crt; do \
+        [ -f "$cert" ] || continue; \
+        alias="corpproxy-$(basename "$cert" .crt)"; \
+        keytool -delete -alias "$alias" \
+                -keystore "$JAVA_HOME/lib/security/cacerts" \
+                -storepass changeit 2>/dev/null || true; \
+        keytool -importcert -trustcacerts -noprompt \
+                -file "$cert" \
+                -keystore "$JAVA_HOME/lib/security/cacerts" \
+                -storepass changeit \
+                -alias "$alias"; \
+        imported=$((imported + 1)); \
+    done; \
+    echo "Imported $imported corporate CA certificate(s) into JVM truststore."
+
+USER 1000

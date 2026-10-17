@@ -1,0 +1,39 @@
+# Tiny disk-backed caching HTTP proxy that fronts pypi.org +
+# files.pythonhosted.org. ORT / prelock containers reach it via
+# http://pypi-cache:9998/simple/ on the ort-egress network (set via
+# PIP_INDEX_URL).
+#
+# Usage: docker compose build pypi-cache
+#        docker compose up -d pypi-cache
+
+FROM python:3.12-slim
+
+USER root
+
+# Trust corporate-proxy root CAs from ./certs (same files as Dockerfile.ort
+# and Dockerfile.npmcache).
+# `certs` is a named build context (additional_contexts in docker-compose.yml),
+# bind-mounted for the RUN below only: just its *.crt files are copied into the
+# image, so stray keys or other files in certs/ never reach a layer.  The build
+# succeeds with no .crt files present.
+RUN --mount=type=bind,from=certs,target=/tmp/certs \
+    set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates; \
+    mkdir -p /usr/local/share/ca-certificates; \
+    find /tmp/certs -maxdepth 1 -type f -name '*.crt' -exec cp {} /usr/local/share/ca-certificates/ \; ; \
+    update-ca-certificates; \
+    rm -rf /var/lib/apt/lists/*
+
+# Point every Python TLS path at the merged bundle so urllib accepts the
+# proxy-intercepted chain to pypi.org and files.pythonhosted.org.
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    PYTHONUNBUFFERED=1
+
+COPY cache_server/pypi.py /app/server.py
+WORKDIR /app
+
+EXPOSE 9998
+
+CMD ["python3", "/app/server.py"]

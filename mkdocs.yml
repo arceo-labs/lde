@@ -1,0 +1,21 @@
+site_name: Library Dependency Explorer
+site_description: Index every dependency across your GitHub organizations — without cloning a repository.
+
+docs_dir: docs
+theme:
+  name: readthedocs
+
+nav:
+  - Home: index.md
+  - Usage: usage.md
+  - Package Search: pkg-search.md
+  - Settings: settings.md
+  - API Reference: api.md
+  - Architecture: architecture.md
+  - Design Decisions: decisions.md
+  - Deployment:
+    - AWS ECS Setup: aws-deployment.md
+  - Operations:
+    - Start Fresh (local): start-fresh.md
+    - Secrets Rotation: runbook-secrets-rotation.md
+    - AWS Cost Control: aws-cost-control.md

@@ -1,0 +1,50 @@
+# Allowlist: the image gets only what the server runs and serves. Everything
+# else in the build context (docs, tests, scripts, Terraform, agent files)
+# stays out.
+#
+# Files are enumerated individually, not by directory (`!backend/`), because
+# a directory-level allowlist re-includes EVERY file under that path by name
+# — including an untracked local file (a stray secret, a half-finished edit)
+# that was never committed. Enumerating exact files means an untracked file
+# dropped into backend/, css/, or js/ is still caught by the leading `*` and
+# never reaches the image, even if someone runs `docker build .` directly
+# instead of the git-archive-based build in docs/aws-deployment.md.
+#
+# Keep this list in sync with `git ls-files backend css js server.py
+# index.html LICENSE NOTICE`. A new tracked file that isn't added here is
+# left out of the image (server.py fails to import it) rather than silently
+# shipping an untracked one — a loud failure on build/boot, not a silent leak.
+*
+!server.py
+!index.html
+!LICENSE
+!NOTICE
+!backend/__init__.py
+!backend/bom_cache.py
+!backend/cid_manager.py
+!backend/db.py
+!backend/dtrack_client.py
+!backend/extractor.py
+!backend/gh_auth.py
+!backend/github_client.py
+!backend/github_sbom.py
+!backend/log.py
+!backend/mocker.py
+!backend/ort_runner.py
+!backend/package_extractor.py
+!backend/pipeline.py
+!backend/poetry_fallback.py
+!backend/prelock.py
+!backend/sandbox.py
+!backend/sanitizer.py
+!backend/secrets_loader.py
+!backend/settings.py
+!backend/task_queue.py
+!css/styles.css
+!js/api.js
+!js/app.js
+!js/package_search.js
+!js/runs.js
+!js/settings.js
+**/__pycache__
+**/*.pyc

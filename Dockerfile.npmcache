@@ -1,0 +1,38 @@
+# Tiny disk-backed caching HTTP proxy that fronts registry.npmjs.org.
+# ORT / prelock containers reach it via http://npm-cache:9999 on the
+# ort-egress network (set via NPM_CONFIG_REGISTRY). The proxy in turn
+# talks HTTPS to npmjs.org, so it needs the corporate-proxy root CAs
+# in its system trust store.
+#
+# Usage: docker compose build npm-cache
+#        docker compose up -d npm-cache
+
+FROM python:3.12-slim
+
+USER root
+
+# Trust corporate-proxy root CAs from ./certs (same files as Dockerfile.ort).
+# `certs` is a named build context (additional_contexts in docker-compose.yml),
+# bind-mounted for the RUN below only: just its *.crt files are copied into the
+# image, so stray keys or other files in certs/ never reach a layer.  The build
+# succeeds with no .crt files present.
+RUN --mount=type=bind,from=certs,target=/tmp/certs \
+    set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates; \
+    mkdir -p /usr/local/share/ca-certificates; \
+    find /tmp/certs -maxdepth 1 -type f -name '*.crt' -exec cp {} /usr/local/share/ca-certificates/ \; ; \
+    update-ca-certificates; \
+    rm -rf /var/lib/apt/lists/*
+
+# Point every Python TLS path at the merged bundle.
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    PYTHONUNBUFFERED=1
+
+COPY cache_server/server.py /app/server.py
+WORKDIR /app
+
+EXPOSE 9999
+
+CMD ["python3", "/app/server.py"]

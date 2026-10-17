@@ -1,0 +1,45 @@
+.settings.json
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+runs/
+.cache/
+.DS_Store
+certs/*.crt
+certs/*.pem
+certs/*.cer
+# Defensive: catch any stray cert/key material exported anywhere in the tree
+*.crt
+*.pem
+*.cer
+*.pfx
+*.p12
+*.key
+
+# Scan-data artifacts and local outputs — never commit real org/repo data
+*.csv
+*.pdf
+
+# Terraform local state and real variable values (keep *.tfvars.example)
+terraform/*.tfvars
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+backend.hcl
+
+# Built docs site and editor scratch
+site/
+.cursor/
+
+# Python packaging / test caches
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Handoff notes and patch folders passed between machines
+*handoff.md
+lde-handoff-*/
