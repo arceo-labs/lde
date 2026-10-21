@@ -176,3 +176,17 @@ def test_headers_refuse_to_go_out_unauthenticated():
     with pytest.raises(github_client.GhError):
         github_client._make_headers(None)
     assert github_client._make_headers('t')['Authorization'] == 'Bearer t'
+
+
+def test_placeholder_orgs_cover_the_example_file():
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        '.settings.json.example')
+    with open(path) as f:
+        example = json.load(f)
+    names = set(example.get('default_orgs', [])) | set(example.get('github_pats', {}))
+    assert names, 'example file lists no orgs'
+    assert names <= settings_mod.PLACEHOLDER_ORGS
+
+
+def test_placeholder_orgs_matches_case_insensitively_and_dedupes():
+    assert settings_mod.placeholder_orgs(['Example-Org', 'acme', 'example-org', 5]) == ['Example-Org']

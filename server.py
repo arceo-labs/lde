@@ -510,6 +510,15 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('ORT is disabled in this deployment (no Docker socket)')
             raise ValueError(f'Invalid method {method!r}: must be one of {sorted(valid)}')
 
+        # An org copied from .settings.json.example is not a real target, even when a
+        # "*" token would let the call through.
+        placeholders = settings_mod.placeholder_orgs(requested_orgs)
+        if placeholders:
+            raise ValueError(
+                f'{", ".join(placeholders)} {"is an example org" if len(placeholders) == 1 else "are example orgs"} '
+                'from .settings.json.example. Replace default_orgs in Settings with your real orgs, '
+                'or pass orgs explicitly.')
+
         # Fail fast: an org with no PAT (and no "*" entry) would only fail later,
         # inside the pipeline, where it is logged and skipped.
         if method == 'github_sbom':

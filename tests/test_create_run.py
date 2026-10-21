@@ -35,7 +35,7 @@ def no_default_orgs(monkeypatch, tmp_path):
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'create_run.db'))
     db.init_db()
     monkeypatch.setattr(server.settings_mod, 'load_settings',
-                        lambda: {'default_orgs': [], 'github_pats': {'example-org': 'github_pat_test'}})
+                        lambda: {'default_orgs': [], 'github_pats': {'acme': 'github_pat_test'}})
     started = []
     monkeypatch.setattr(server.pipeline, 'start_in_background', started.append)
     return started
@@ -51,11 +51,11 @@ def _stored_orgs(run_id):
 
 
 def test_org_repo_without_orgs_derives_org(no_default_orgs):
-    handler = _make_handler({'repos': ['example-org/example-service'], 'method': 'github_sbom'})
+    handler = _make_handler({'repos': ['acme/example-service'], 'method': 'github_sbom'})
     handler.handle_create_run((), {})
     assert handler._sent_status == 202
     run_id = json.loads(handler._buf.getvalue())['run_id']
-    assert _stored_orgs(run_id) == ['example-org']
+    assert _stored_orgs(run_id) == ['acme']
     assert no_default_orgs == [run_id]
 
 
@@ -71,7 +71,7 @@ def _with_settings(monkeypatch, **cfg):
 
 
 def test_org_without_pat_is_rejected_before_run_is_created(no_default_orgs, monkeypatch):
-    _with_settings(monkeypatch, default_orgs=[], github_pats={'example-org': 'github_pat_test'})
+    _with_settings(monkeypatch, default_orgs=[], github_pats={'acme': 'github_pat_test'})
     handler = _make_handler({'repos': ['other-org/svc'], 'method': 'github_sbom'})
     with pytest.raises(ValueError, match='No GitHub PAT configured for: other-org'):
         handler.handle_create_run((), {})
@@ -79,10 +79,10 @@ def test_org_without_pat_is_rejected_before_run_is_created(no_default_orgs, monk
 
 
 def test_default_orgs_without_pats_are_rejected(no_default_orgs, monkeypatch):
-    _with_settings(monkeypatch, default_orgs=['example-org', 'another-org'],
-                   github_pats={'example-org': '', 'another-org': ''})
+    _with_settings(monkeypatch, default_orgs=['acme', 'globex'],
+                   github_pats={'acme': '', 'globex': ''})
     handler = _make_handler({'method': 'github_sbom'})
-    with pytest.raises(ValueError, match='example-org, another-org'):
+    with pytest.raises(ValueError, match='acme, globex'):
         handler.handle_create_run((), {})
     assert no_default_orgs == []
 
@@ -92,3 +92,20 @@ def test_star_entry_allows_any_org(no_default_orgs, monkeypatch):
     handler = _make_handler({'repos': ['other-org/svc'], 'method': 'github_sbom'})
     handler.handle_create_run((), {})
     assert handler._sent_status == 202
+
+
+@pytest.mark.parametrize('pats', [{'*': 'ghp_test'}, {'example-org': 'github_pat_test'}])
+def test_example_orgs_are_rejected_even_with_a_token(no_default_orgs, monkeypatch, pats):
+    _with_settings(monkeypatch, default_orgs=['example-org', 'Another-Org', 'acme'], github_pats=pats)
+    handler = _make_handler({'method': 'github_sbom'})
+    with pytest.raises(ValueError, match='example-org, Another-Org are example orgs'):
+        handler.handle_create_run((), {})
+    assert no_default_orgs == []
+
+
+def test_example_org_in_repo_pair_is_rejected(no_default_orgs, monkeypatch):
+    _with_settings(monkeypatch, default_orgs=[], github_pats={'*': 'ghp_test'})
+    handler = _make_handler({'repos': ['example-org/example-service']})
+    with pytest.raises(ValueError, match='example org'):
+        handler.handle_create_run((), {})
+    assert no_default_orgs == []

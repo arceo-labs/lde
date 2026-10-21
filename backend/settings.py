@@ -113,6 +113,24 @@ def legacy_pat_notice():
     return LEGACY_PAT_NOTICE if present else ''
 
 
+# Org names that ship in .settings.json.example. Reviewing one of these is almost
+# certainly a copied example config, and a "*" token would send it to GitHub.
+PLACEHOLDER_ORGS = frozenset({
+    'example-org', 'example-org-hris', 'example-org-test', 'another-org', 'example-website',
+})
+
+
+def placeholder_orgs(orgs):
+    """Return the entries of *orgs* that are example placeholders (case-insensitive, de-duplicated)."""
+    seen, found = set(), []
+    for org in orgs:
+        key = org.lower() if isinstance(org, str) else ''
+        if key in PLACEHOLDER_ORGS and key not in seen:
+            seen.add(key)
+            found.append(org)
+    return found
+
+
 def github_tokens(cfg):
     """Return {owner: token} from the ``github_pats`` map in *cfg* (owners lower-cased)."""
     pats = {}
