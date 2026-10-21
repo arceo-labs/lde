@@ -1,5 +1,6 @@
 """Per-org fine-grained PAT selection, settings merge, and masking."""
 
+import json
 import os
 import sys
 from unittest.mock import patch
@@ -145,3 +146,18 @@ def test_masked_hides_every_token():
     out = settings_mod.masked({'github_pats': {'a': 'github_pat_secret'}})
     assert out['github_pats'] == {'a': 'gith…'}
 
+
+
+def test_save_preserves_legacy_github_pat_on_disk(tmp_path):
+    f = tmp_path / 's.json'
+    f.write_text('{"github_pat": "legacy-token", "dtrack_url": "http://old"}')
+    with patch.object(settings_mod, 'SETTINGS_PATH', str(f)), \
+         patch.dict(os.environ, {}, clear=False):
+        os.environ.pop('LDE_GITHUB_PAT', None)
+        out = settings_mod.save_settings({'dtrack_url': 'http://new'})
+        notice = settings_mod.legacy_pat_notice()
+    assert 'github_pat' not in out
+    stored = json.loads(f.read_text())
+    assert stored['github_pat'] == 'legacy-token'
+    assert stored['dtrack_url'] == 'http://new'
+    assert notice

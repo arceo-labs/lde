@@ -190,10 +190,26 @@ def save_settings(updates):
             current[k] = merge_github_pats(current.get(k), v)
         else:
             current[k] = v
+    # load_settings() drops the retired github_pat. Keep it on disk, untouched, until
+    # the user moves it into github_pats and deletes it, so an unrelated save does not
+    # destroy the token or the "old config" notice. It never goes into the return value.
+    on_disk = dict(current)
+    legacy = _stored_legacy_pat()
+    if legacy is not None:
+        on_disk['github_pat'] = legacy
     with open(SETTINGS_PATH, 'w') as f:
-        json.dump(current, f, indent=2)
+        json.dump(on_disk, f, indent=2)
     os.chmod(SETTINGS_PATH, 0o600)
     return current
+
+
+def _stored_legacy_pat():
+    """Return the raw ``github_pat`` value stored in the settings file, else None."""
+    try:
+        with open(SETTINGS_PATH, 'r') as f:
+            return json.load(f).get('github_pat')
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def masked(settings):
