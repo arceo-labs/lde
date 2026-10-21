@@ -188,12 +188,25 @@ export async function renderSettings(root) {
       ort_egress_network: document.getElementById('s-net').value.trim(),
     };
     const pats = {};
+    const incomplete = [];
     for (const row of patRows.querySelectorAll('.pat-row')) {
       const org = row.querySelector('.pat-org').value.trim();
       const token = row.querySelector('.pat-token').value.trim();
-      if (!org) continue;
-      if (row.classList.contains('removed')) pats[org] = '';
-      else if (token) pats[org] = token;
+      if (row.classList.contains('removed')) {
+        if (org) pats[org] = '';
+      } else if (token && !org) {
+        incomplete.push('a token has no org name');
+      } else if (org && !token && !row.dataset.saved) {
+        incomplete.push(`${org} has no token`);
+      } else if (org && token) {
+        pats[org] = token;
+      }
+    }
+    if (incomplete.length) {
+      // textContent, not innerHTML: org names are user input.
+      document.getElementById('save-status').textContent =
+        `Not saved: ${incomplete.join('; ')}. Fill in both fields or remove the row.`;
+      return;
     }
     if (Object.keys(pats).length) patch.github_pats = pats;
     const newKey = document.getElementById('s-dtkey').value;

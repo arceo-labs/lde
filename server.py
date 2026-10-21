@@ -512,7 +512,12 @@ class Handler(BaseHTTPRequestHandler):
 
         # An org copied from .settings.json.example is not a real target, even when a
         # "*" token would let the call through.
-        placeholders = settings_mod.placeholder_orgs(requested_orgs)
+        # Check every org the run can reach. A mixed repos list (org/repo plus bare
+        # names) keeps requested_orgs at the defaults, so add the org/repo prefixes too;
+        # the stored org list is unchanged.
+        check_orgs = list(dict.fromkeys(
+            requested_orgs + [r.split('/')[0] for r in requested_repos if '/' in r]))
+        placeholders = settings_mod.placeholder_orgs(check_orgs)
         if placeholders:
             raise ValueError(
                 f'{", ".join(placeholders)} {"is an example org" if len(placeholders) == 1 else "are example orgs"} '
@@ -522,7 +527,7 @@ class Handler(BaseHTTPRequestHandler):
         # Fail fast: an org with no PAT (and no "*" entry) would only fail later,
         # inside the pipeline, where it is logged and skipped.
         if method == 'github_sbom':
-            missing = github_client.orgs_without_token(requested_orgs)
+            missing = github_client.orgs_without_token(check_orgs)
             if missing:
                 shown = ', '.join(str(o)[:80] for o in missing[:10])
                 raise ValueError(
