@@ -56,23 +56,61 @@ def _valid_branch(branch):
 
 
 class GhError(RuntimeError):
-    pass
+    """GitHub call failed. *status* is the HTTP status when there was one.
+
+    Callers branch on ``status``, never on the message: the message carries
+    the request URL, so an org or repo named ``team404`` would match "404".
+    """
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
-def _get_token():
-    """Read the GitHub PAT from settings (Secrets Manager overlay applied at load time)."""
-    return settings_mod.load_settings().get('github_pat', '').strip()
+def _get_token(org):
+    """Return the PAT for *org* from the ``github_pats`` map.
+
+    Fine-grained PATs are bound to one resource owner, so each org has its own
+    entry. A ``"*"`` entry is the token for any org without one of its own (for
+    example a classic PAT that spans several orgs). Raises GhError when neither
+    exists: an unknown org is never sent unauthenticated. Settings carry the
+    Secrets Manager overlay applied at load time.
+    """
+    pats = settings_mod.github_tokens(settings_mod.load_settings())
+    key = (org or '').lower()
+    if key in pats:
+        return pats[key]
+    if '*' in pats:
+        return pats['*']
+    raise GhError(f'No GitHub PAT configured for org {org!r}. Add one in Settings, '
+                  f'or add a "*" entry to use one token for every other org.')
 
 
-def _make_headers(token=None):
-    tok = token or _get_token()
+def orgs_without_token(orgs):
+    """Return the orgs in *orgs* that have neither their own PAT nor a ``"*"`` entry."""
+    pats = settings_mod.github_tokens(settings_mod.load_settings())
+    if '*' in pats:
+        return []
+    seen, missing = set(), []
+    for org in orgs:
+        key = org.lower() if isinstance(org, str) else ''
+        if key not in pats and key not in seen:
+            seen.add(key)
+            missing.append(org if isinstance(org, str) else repr(org))
+    return missing
+
+
+def _make_headers(token):
+    # Fail closed: a request without a token would go to GitHub unauthenticated.
+    if not token:
+        raise GhError('No GitHub PAT supplied for this request; refusing to call GitHub '
+                      'unauthenticated.')
     headers = {
         'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': _API_VERSION,
         'User-Agent': 'LibraryDependencyExplorer/1.0',
+        'Authorization': f'Bearer {token}',
     }
-    if tok:
-        headers['Authorization'] = f'Bearer {tok}'
     return headers
 
 
@@ -113,7 +151,7 @@ def _request(method, url, *, accept=None, token=None, attempts=0):
                 logger.warning('rate-limited; sleeping %ds (attempt %d)', wait, attempts + 1)
                 time.sleep(wait)
                 return _request(method, url, accept=accept, token=token, attempts=attempts + 1)
-        raise GhError(f'GitHub API {exc.code} for {url}: {exc.reason}') from exc
+        raise GhError(f'GitHub API {exc.code} for {url}: {exc.reason}', status=exc.code) from exc
     except urllib.error.URLError as exc:
         raise GhError(f'GitHub API network error for {url}: {exc.reason}') from exc
 
@@ -148,7 +186,7 @@ def list_repos(org):
     params = urlencode({'per_page': 100, 'type': 'all', 'sort': 'full_name'})
     url = f'{_API_BASE}/orgs/{org}/repos?{params}'
     repos = []
-    for entry in _get_paginated(url):
+    for entry in _get_paginated(url, token=_get_token(org)):
         if entry.get('archived'):
             continue
         name = entry.get('name')
@@ -168,10 +206,11 @@ def get_repo_default_branch(org, repo):
     if not _ID_RE.match(org or '') or not _ID_RE.match(repo or ''):
         raise ValueError('Invalid org/repo identifier')
     url = f'{_API_BASE}/repos/{org}/{repo}'
+    token = _get_token(org)
     try:
-        data = _get_json(url)
+        data = _get_json(url, token=token)
     except GhError as exc:
-        if '404' in str(exc) or '403' in str(exc):
+        if exc.status in (404, 403):
             return None
         raise
     return data.get('default_branch') if isinstance(data, dict) else None
@@ -184,11 +223,11 @@ def list_tree_paths(org, repo, branch):
     if not _valid_branch(branch):
         raise ValueError(f'Invalid branch name: {branch!r}')
     url = f'{_API_BASE}/repos/{org}/{repo}/git/trees/{quote(branch, safe="")}?recursive=1'
+    token = _get_token(org)
     try:
-        data = _get_json(url)
+        data = _get_json(url, token=token)
     except GhError as exc:
-        msg = str(exc)
-        if '404' in msg or '409' in msg:
+        if exc.status in (404, 409):
             # 409 = empty repo; 404 = branch not found
             return []
         raise
@@ -207,6 +246,7 @@ def fetch_file(org, repo, path):
     body, _ = _request(
         'GET', url,
         accept='application/vnd.github.v3.raw',
+        token=_get_token(org),
     )
     return body.decode('utf-8', errors='replace')
 
@@ -224,11 +264,11 @@ def fetch_dependency_sbom(org, repo):
     if not _ID_RE.match(org or '') or not _ID_RE.match(repo or ''):
         raise ValueError('Invalid org/repo identifier')
     url = f'{_API_BASE}/repos/{org}/{repo}/dependency-graph/sbom'
+    token = _get_token(org)
     try:
-        return _get_json(url)
+        return _get_json(url, token=token)
     except GhError as exc:
-        msg = str(exc)
-        if '404' in msg or '403' in msg:
+        if exc.status in (404, 403):
             return None
         raise
 
@@ -258,7 +298,7 @@ def _post_graphql(query, variables=None, *, token=None, attempts=0):
                            exc.code, wait, attempts + 1)
             time.sleep(wait)
             return _post_graphql(query, variables, token=token, attempts=attempts + 1)
-        raise GhError(f'GitHub GraphQL {exc.code}: {exc.reason}') from exc
+        raise GhError(f'GitHub GraphQL {exc.code}: {exc.reason}', status=exc.code) from exc
     except urllib.error.URLError as exc:
         raise GhError(f'GitHub GraphQL network error: {exc.reason}') from exc
     data = json.loads(body)
@@ -286,11 +326,11 @@ def fetch_dependency_diff(org, repo, base, head):
         raise ValueError('Invalid base/head ref')
     basehead = f'{quote(base, safe="")}...{quote(head, safe="")}'
     url = f'{_API_BASE}/repos/{org}/{repo}/dependency-graph/compare/{basehead}'
+    token = _get_token(org)
     try:
-        result = _get_json(url)
+        result = _get_json(url, token=token)
     except GhError as exc:
-        msg = str(exc)
-        if '404' in msg or '403' in msg:
+        if exc.status in (404, 403):
             return None
         raise
     return result if isinstance(result, list) else []

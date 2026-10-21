@@ -287,7 +287,7 @@ Anything else is not a login for those prompts:
 
 | Value | Used for | Secret |
 |---|---|---|
-| GitHub fine-grained PAT | Resource owner is the org whose repos you scan, not your user account. | `lde/github-pat`, the token itself |
+| GitHub fine-grained PATs | One per org: the resource owner is the org whose repos you scan, not your user account. | `lde/github-pat`, a JSON object `{"<org>": "<token>"}` |
 | Dependency-Track API key | Created by `scripts/bootstrap_dtrack.py` in Step 5 | `lde/dtrack-api-key` |
 | Gemini API key | Package-name extraction only. Skip it until you use that feature. | `lde/gemini-api-key` |
 
@@ -314,16 +314,24 @@ than its title: titles with spaces or `#` break the quoting. Paste each command
 whole; a line that wraps without its trailing `\` splits the pipe and writes
 nothing.
 
-### GitHub PAT
+### GitHub PATs
+
+One fine-grained PAT per org, written as one JSON object. Requires `jq`. Add one `--arg` and one
+key per org; each org's key must match its GitHub name.
 
 ```bash
-op item get <item-id> --vault <vault-name> --fields label=password --reveal \
+jq -n \
+  --arg a "$(op item get <item-id-a> --vault <vault-name> --fields label=password --reveal)" \
+  --arg b "$(op item get <item-id-b> --vault <vault-name> --fields label=password --reveal)" \
+  '{"example-org": $a, "another-org": $b}' \
   | tr -d '\n' \
   | aws secretsmanager put-secret-value \
       --secret-id lde/github-pat \
       --secret-string file:///dev/stdin \
       --region us-east-1
 ```
+
+To use one token (for example a classic PAT that spans orgs) for every org without its own entry, add a `"*"` key. An org with neither is an error.
 
 ### Gemini API key
 

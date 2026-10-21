@@ -9,13 +9,13 @@ For the pipeline mechanics see `TRD.md` and `README.md` in the repository root.
 ## 1. PAT-based GitHub auth replaces `gh` CLI
 
 **Decision:** All GitHub API calls go through `backend/github_client.py` and `backend/gh_auth.py`
-using a `github_pat` setting, not the `gh` CLI subprocess.
+using the `github_pats` setting (one PAT per org), not the `gh` CLI subprocess.
 
 **Why:**
 The original implementation shelled out to `gh api ...` and relied on the user's interactive
 `gh` session. That works on a developer laptop but breaks in ECS Fargate — Fargate tasks have
 no persistent home directory, no keychain, and no interactive login flow.
-The PAT is stored in AWS Secrets Manager (`lde/github-pat`) and injected at runtime via
+The PAT is stored in AWS Secrets Manager (`lde/github-pat`, a JSON object) and injected at runtime via
 `secrets_loader.overlay()`, giving Fargate the same credentials it needs without any host state.
 
 **Trade-off:**

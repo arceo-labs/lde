@@ -84,6 +84,11 @@ th { color: #9aa4b2; font-weight: 500; }
 }
 
 .muted { color: #9aa4b2; font-size: 13px; }
+
+.pat-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.pat-row .pat-org { flex: 1 1 140px; width: auto; }
+.pat-row .pat-token { flex: 3 1 240px; width: auto; }
+.pat-row.removed .pat-org, .pat-row.removed .pat-token { opacity: 0.4; text-decoration: line-through; }
 #pkg-count { margin-left: 12px; }
 .pkg-count-num { color: #fff; font-weight: 700; }
 .pager { display: flex; align-items: center; gap: 12px; margin-top: 12px; }

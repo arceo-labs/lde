@@ -15,7 +15,7 @@ Every `POST` and `PUT` must send `Content-Type: application/json`, including req
 
 ### GET /api/settings
 
-Returns current settings with sensitive keys masked (`github_pat`, `dtrack_api_key`, `gemini_api_key` are truncated to 4 chars + `…`).
+Returns current settings with sensitive keys masked (`github_pats` values, `dtrack_api_key`, `gemini_api_key` are truncated to 4 chars + `…`).
 
 ```bash
 curl -s -u admin:password http://localhost:8002/api/settings | python3 -m json.tool
@@ -32,7 +32,7 @@ Patches one or more settings keys. Unknown keys return `400`. In Fargate (`LDE_S
 ```bash
 curl -s -u admin:password -X PUT http://localhost:8002/api/settings \
   -H 'Content-Type: application/json' \
-  -d '{"github_pat": "github_pat_XXX", "default_orgs": ["example-org"]}'
+  -d '{"github_pats": {"example-org": "github_pat_XXX"}, "default_orgs": ["example-org"]}'
 ```
 
 **Request body:** JSON object with any subset of the allowed settings keys.
@@ -47,7 +47,7 @@ curl -s -u admin:password -X PUT http://localhost:8002/api/settings \
 
 ### GET /api/gh-status
 
-Validates the configured `github_pat` by calling `GET /user` against the GitHub API and returns auth state.
+Validates each token in `github_pats` by calling `GET /user` against the GitHub API and returns auth state. `accounts` has one entry per configured token (`org`, `user`, `ok`); the `*` entry reports `org: "*"`.
 
 ```bash
 curl -s -u admin:password http://localhost:8002/api/gh-status | python3 -m json.tool
@@ -57,9 +57,10 @@ curl -s -u admin:password http://localhost:8002/api/gh-status | python3 -m json.
 
 | Field | Type | Description |
 |---|---|---|
-| `installed` | bool | `true` when `github_pat` is non-empty in settings |
-| `logged_in` | bool | `true` when the PAT authenticated successfully |
-| `accounts` | array | Login, scopes, and host for each authenticated account |
+| `installed` | bool | `true` when `github_pats` holds at least one token |
+| `logged_in` | bool | `true` when every PAT authenticated successfully |
+| `accounts` | array | One entry per configured token: `host`, `org`, `user`, `ok` |
+| `notice` | string | Set when an old `github_pat` is still configured; empty otherwise |
 | `raw` | string | Human-readable summary for the Settings UI |
 
 ---
@@ -165,7 +166,7 @@ curl -s -u admin:password -X POST http://localhost:8002/api/runs \
 **Response:** `202` — `{"run_id": "<hex>"}`
 
 **Errors:**
-- `400` — invalid `method`, invalid repo name format, invalid `branch` name, or no orgs configured
+- `400` — invalid `method`, invalid repo name format, invalid `branch` name, no orgs configured, an example org from `.settings.json.example` (for example `example-org`), or (for `github_sbom`) an org with no entry in `github_pats` and no `"*"` entry; the message lists those orgs
 
 ---
 
