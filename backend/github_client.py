@@ -59,20 +59,33 @@ class GhError(RuntimeError):
     pass
 
 
-def _get_token():
-    """Read the GitHub PAT from settings (Secrets Manager overlay applied at load time)."""
-    return settings_mod.load_settings().get('github_pat', '').strip()
+def _get_token(org):
+    """Return the PAT for *org* from the ``github_pats`` map.
+
+    Fine-grained PATs are bound to one resource owner, so each org has its own
+    entry. A ``"*"`` entry is the token for any org without one of its own (for
+    example a classic PAT that spans several orgs). Raises GhError when neither
+    exists: an unknown org is never sent unauthenticated. Settings carry the
+    Secrets Manager overlay applied at load time.
+    """
+    pats = settings_mod.github_tokens(settings_mod.load_settings())
+    key = (org or '').lower()
+    if key in pats:
+        return pats[key]
+    if '*' in pats:
+        return pats['*']
+    raise GhError(f'No GitHub PAT configured for org {org!r}. Add one in Settings, '
+                  f'or add a "*" entry to use one token for every other org.')
 
 
-def _make_headers(token=None):
-    tok = token or _get_token()
+def _make_headers(token):
     headers = {
         'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': _API_VERSION,
         'User-Agent': 'LibraryDependencyExplorer/1.0',
     }
-    if tok:
-        headers['Authorization'] = f'Bearer {tok}'
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
     return headers
 
 
@@ -148,7 +161,7 @@ def list_repos(org):
     params = urlencode({'per_page': 100, 'type': 'all', 'sort': 'full_name'})
     url = f'{_API_BASE}/orgs/{org}/repos?{params}'
     repos = []
-    for entry in _get_paginated(url):
+    for entry in _get_paginated(url, token=_get_token(org)):
         if entry.get('archived'):
             continue
         name = entry.get('name')
@@ -168,8 +181,9 @@ def get_repo_default_branch(org, repo):
     if not _ID_RE.match(org or '') or not _ID_RE.match(repo or ''):
         raise ValueError('Invalid org/repo identifier')
     url = f'{_API_BASE}/repos/{org}/{repo}'
+    token = _get_token(org)
     try:
-        data = _get_json(url)
+        data = _get_json(url, token=token)
     except GhError as exc:
         if '404' in str(exc) or '403' in str(exc):
             return None
@@ -184,8 +198,9 @@ def list_tree_paths(org, repo, branch):
     if not _valid_branch(branch):
         raise ValueError(f'Invalid branch name: {branch!r}')
     url = f'{_API_BASE}/repos/{org}/{repo}/git/trees/{quote(branch, safe="")}?recursive=1'
+    token = _get_token(org)
     try:
-        data = _get_json(url)
+        data = _get_json(url, token=token)
     except GhError as exc:
         msg = str(exc)
         if '404' in msg or '409' in msg:
@@ -207,6 +222,7 @@ def fetch_file(org, repo, path):
     body, _ = _request(
         'GET', url,
         accept='application/vnd.github.v3.raw',
+        token=_get_token(org),
     )
     return body.decode('utf-8', errors='replace')
 
@@ -224,8 +240,9 @@ def fetch_dependency_sbom(org, repo):
     if not _ID_RE.match(org or '') or not _ID_RE.match(repo or ''):
         raise ValueError('Invalid org/repo identifier')
     url = f'{_API_BASE}/repos/{org}/{repo}/dependency-graph/sbom'
+    token = _get_token(org)
     try:
-        return _get_json(url)
+        return _get_json(url, token=token)
     except GhError as exc:
         msg = str(exc)
         if '404' in msg or '403' in msg:
@@ -286,8 +303,9 @@ def fetch_dependency_diff(org, repo, base, head):
         raise ValueError('Invalid base/head ref')
     basehead = f'{quote(base, safe="")}...{quote(head, safe="")}'
     url = f'{_API_BASE}/repos/{org}/{repo}/dependency-graph/compare/{basehead}'
+    token = _get_token(org)
     try:
-        result = _get_json(url)
+        result = _get_json(url, token=token)
     except GhError as exc:
         msg = str(exc)
         if '404' in msg or '403' in msg:

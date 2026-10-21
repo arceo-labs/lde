@@ -14,6 +14,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend import github_client  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _pat_for_org_o(monkeypatch):
+    """Token lookup is per org and reads settings; never touch the real file."""
+    monkeypatch.setattr(github_client.settings_mod, 'load_settings',
+                        lambda: {'github_pats': {'o': 'github_pat_test'}})
+
+
 # ---------------------------------------------------------------------------
 # _valid_branch
 # ---------------------------------------------------------------------------

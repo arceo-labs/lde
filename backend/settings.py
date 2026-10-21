@@ -2,13 +2,18 @@
 
 import json
 import os
+import re
+
+from . import log as log_mod
+
+logger = log_mod.get('settings')
 
 SERVE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SETTINGS_PATH = os.path.join(SERVE_DIR, '.settings.json')
 
 ALLOWED_KEYS = {
     'default_orgs',
-    'github_pat',
+    'github_pats',
     'dtrack_url',
     'dtrack_ui_url',
     'dtrack_api_key',
@@ -29,11 +34,13 @@ ALLOWED_KEYS = {
     'enabled_package_managers',
 }
 
-SENSITIVE_KEYS = {'github_pat', 'dtrack_api_key', 'gemini_api_key', 'basic_auth_credentials'}
+SENSITIVE_KEYS = {'github_pats', 'dtrack_api_key', 'gemini_api_key', 'basic_auth_credentials'}
 
 DEFAULTS = {
     'default_orgs': [],
-    'github_pat': '',
+    # GitHub PATs: {"<org-or-user>": "<token>"}. A fine-grained PAT is bound to
+    # one resource owner, so reviewing several orgs needs one token each.
+    'github_pats': {},
     'dtrack_url': 'http://localhost:8081',
     'dtrack_ui_url': 'http://localhost:8080',
     'dtrack_api_key': '',
@@ -79,6 +86,44 @@ DEFAULTS = {
 }
 
 
+LEGACY_PAT_NOTICE = ('"github_pat" is no longer used. Move the token into '
+                     '"github_pats": {"<org>": "<token>"} in .settings.json (or add it per org '
+                     'in Settings; use "*" for a token that covers every other org), then '
+                     'delete "github_pat".')
+_legacy_logged = False
+
+
+def legacy_pat_notice():
+    """Return LEGACY_PAT_NOTICE when an old ``github_pat`` is still configured, else ''.
+
+    Checks the settings file and the LDE_GITHUB_PAT env var. Reads only the key
+    names, never the values. The notice is logged once per process.
+    """
+    global _legacy_logged
+    present = bool(os.environ.get('LDE_GITHUB_PAT'))
+    if not present and os.path.exists(SETTINGS_PATH):
+        try:
+            with open(SETTINGS_PATH, 'r') as f:
+                present = 'github_pat' in json.load(f)
+        except (OSError, ValueError):
+            present = False
+    if present and not _legacy_logged:
+        _legacy_logged = True
+        logger.warning(LEGACY_PAT_NOTICE)
+    return LEGACY_PAT_NOTICE if present else ''
+
+
+def github_tokens(cfg):
+    """Return {owner: token} from the ``github_pats`` map in *cfg* (owners lower-cased)."""
+    pats = {}
+    raw = cfg.get('github_pats')
+    if isinstance(raw, dict):
+        for owner, tok in raw.items():
+            if isinstance(owner, str) and isinstance(tok, str) and tok.strip():
+                pats[owner.lower()] = tok.strip()
+    return pats
+
+
 def load_settings():
     if os.path.exists(SETTINGS_PATH):
         with open(SETTINGS_PATH, 'r') as f:
@@ -94,15 +139,55 @@ def load_settings():
     # Useful for non-sensitive config (e.g. LDE_DTRACK_URL) in ECS task defs.
     for key in ALLOWED_KEYS:
         env_val = os.environ.get('LDE_' + key.upper())
-        if env_val is not None:
-            merged[key] = env_val
+        if env_val is None:
+            continue
+        if key == 'github_pats':
+            try:
+                env_val = json.loads(env_val)
+            except ValueError:
+                continue
+            if not isinstance(env_val, dict):
+                continue
+        merged[key] = env_val
+    return merged
+
+
+_PAT_OWNER_RE = re.compile(r'^(\*|[A-Za-z0-9._-]+)$')
+_MASK_SUFFIX = '…'
+
+
+def merge_github_pats(existing, patch):
+    """Return *existing* with the per-org *patch* applied.
+
+    Keys are lower-cased org names. An empty value removes the org; a value
+    ending in the mask character (what GET /api/settings returns) is ignored
+    so a round-tripped form cannot overwrite a real token.
+    """
+    if not isinstance(patch, dict):
+        raise ValueError('github_pats must be a JSON object of {org: token}')
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    for owner, token in patch.items():
+        if not isinstance(owner, str) or not _PAT_OWNER_RE.match(owner):
+            raise ValueError('github_pats keys must be GitHub org or user names, or *')
+        if not isinstance(token, str):
+            raise ValueError('github_pats values must be strings')
+        token = token.strip()
+        key = owner.lower()
+        if not token:
+            merged.pop(key, None)
+        elif not token.endswith(_MASK_SUFFIX):
+            merged[key] = token
     return merged
 
 
 def save_settings(updates):
     current = load_settings()
     for k, v in updates.items():
-        if k in ALLOWED_KEYS:
+        if k not in ALLOWED_KEYS:
+            continue
+        if k == 'github_pats':
+            current[k] = merge_github_pats(current.get(k), v)
+        else:
             current[k] = v
     with open(SETTINGS_PATH, 'w') as f:
         json.dump(current, f, indent=2)
@@ -118,6 +203,9 @@ def masked(settings):
             continue
         if isinstance(val, str):
             out[k] = val[:4] + '…' if len(val) > 4 else '…'
+        elif k == 'github_pats' and isinstance(val, dict):
+            out[k] = {o: (t[:4] + '…' if len(t) > 4 else '…') for o, t in val.items()
+                      if isinstance(t, str)}
         else:
             # Non-string sensitive values (e.g. basic_auth_credentials dict)
             # cannot be safely truncated — omit them entirely.

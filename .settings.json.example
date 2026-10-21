@@ -6,8 +6,11 @@
     "another-org",
     "example-website"
   ],
-  "github_pat": "",
-  "_github_pat_note": "Fine-grained PAT — Contents: Read-only + Metadata: Read-only. Required in Fargate; optional locally if using gh CLI.",
+  "github_pats": {
+    "example-org": "",
+    "another-org": ""
+  },
+  "_github_pats_note": "One fine-grained PAT per org — Contents: Read-only + Metadata: Read-only. Use a \"*\" key for a token that covers every other org (e.g. a classic PAT). Required in Fargate; optional locally if using gh CLI.",
   "gemini_model": "gemini-3.8-flash",
   "_gemini_model_note": "Gemini model used for package extraction. Override without redeploying via LDE_GEMINI_MODEL env var or PUT /api/settings.",
   "dtrack_url": "http://localhost:8081",

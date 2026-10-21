@@ -23,6 +23,7 @@ class OverlayCacheTests(unittest.TestCase):
         secrets_loader._cache.clear()
         self.calls = []
         self.values = {name: f'value-of-{name}' for name in secrets_loader._SECRET_MAP}
+        self.values['lde/github-pat'] = '{"acme": "tok"}'
         self.now = 1000.0
         patches = [
             patch.object(secrets_loader, '_ENABLED', True),
@@ -46,15 +47,15 @@ class OverlayCacheTests(unittest.TestCase):
         second = secrets_loader.overlay({})
         self.assertEqual(len(self.calls), len(secrets_loader._SECRET_MAP))
         self.assertEqual(first, second)
-        self.assertEqual(first['github_pat'], 'value-of-lde/github-pat')
+        self.assertEqual(first['github_pats'], {'acme': 'tok'})
 
     def test_fetches_again_after_ttl(self):
         secrets_loader.overlay({})
-        self.values['lde/github-pat'] = 'rotated'
+        self.values['lde/github-pat'] = '{"acme": "rotated"}'
         self.now += secrets_loader._CACHE_TTL + 1
         out = secrets_loader.overlay({})
         self.assertEqual(len(self.calls), 2 * len(secrets_loader._SECRET_MAP))
-        self.assertEqual(out['github_pat'], 'rotated')
+        self.assertEqual(out['github_pats'], {'acme': 'rotated'})
 
     def test_missing_secret_is_cached_and_left_unset(self):
         self.values['lde/gemini-api-key'] = _http_error(404)
