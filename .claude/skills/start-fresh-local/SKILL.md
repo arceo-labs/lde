@@ -28,15 +28,17 @@ description: Start, restart or reset the local LDE stack (server.py + Dependency
     - Report `WARN GitHub` as "`github_pats` in `.settings.json` is rejected; `github_sbom` runs will fail".
     - The server ends with this session. For a long-lived server, give the user the command to run in their own terminal.
 
+5. **Prompt Dependency-Track UI login** after factory bootstrap in this conversation (new `~/.lde/dtrack-admin.local.txt`). Ask the user to run the `pbcopy` command below, then paste into `http://127.0.0.1:8080` as username `admin`. Done when you have shown them that command. Do not cat the password file.
+
 ## When the preview stops
 
-**`factory / never bootstrapped`.** `admin`/`admin` still requires `FORCE_PASSWORD_CHANGE`. Nothing has changed. Give the user these commands; they run bootstrap (credential change; auto mode blocks the agent). Do not cat the password file.
+**`factory / never bootstrapped`.** `admin`/`admin` still requires `FORCE_PASSWORD_CHANGE`. Nothing has changed. Prompt the user to run these themselves (credential change; auto mode blocks the agent). Do not cat the password file. Done when they have the bootstrap command **and** you have asked them to run `pbcopy` after it.
 
 ```bash
 DTRACK_ADMIN_PASSWORD=admin python3 scripts/bootstrap_dtrack.py --password-out ~/.lde/dtrack-admin.local.txt --no-aws
 ```
 
-Dependency-Track UI (`http://127.0.0.1:8080`) username is `admin`. After bootstrap, copy the password to the clipboard (does not print it):
+Prompt them: after bootstrap, copy the Dependency-Track UI password to the clipboard (does not print it), then log in at `http://127.0.0.1:8080` as username `admin`:
 
 ```bash
 sed -n 2p ~/.lde/dtrack-admin.local.txt | tr -d '\n' | pbcopy
@@ -56,7 +58,7 @@ Then rerun `python3 scripts/start_fresh.py --yes --dtrack-password-file ~/.lde/d
 
 ## Handling secrets
 
-Read `~/.lde/dtrack-admin.txt`, `~/.lde/dtrack-admin.local.txt` and `.settings.json` inside a Python process, and print counts, names and key prefixes only. This applies to any ad-hoc check you run against Dependency-Track, not just the script. Give the user the `pbcopy` one-liner above instead of printing the password.
+Read `~/.lde/dtrack-admin.txt`, `~/.lde/dtrack-admin.local.txt` and `.settings.json` inside a Python process, and print counts, names and key prefixes only. This applies to any ad-hoc check you run against Dependency-Track, not just the script. Prompt the user to run the `pbcopy` one-liner; never print the password.
 
 ## Undo
 
