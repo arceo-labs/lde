@@ -1,6 +1,6 @@
 ---
 name: start-fresh-local
-description: Start, restart or reset the local LDE stack (server.py + Dependency-Track) through scripts/start_fresh.py. Use when asked to run or spin up the app locally, to clear local runs or Dependency-Track projects, or when the local Dependency-Track admin login fails.
+description: Start, restart or reset the local LDE stack (server.py + Dependency-Track) through scripts/start_fresh.py. Use when asked to run or spin up the app locally, to clear local runs or Dependency-Track projects, when a local Dependency-Track is factory / never bootstrapped, or when the local Dependency-Track admin login fails.
 ---
 
 # start-fresh-local
@@ -30,7 +30,19 @@ description: Start, restart or reset the local LDE stack (server.py + Dependency
 
 ## When the preview stops
 
-**`factory / never bootstrapped`.** `admin`/`admin` still requires `FORCE_PASSWORD_CHANGE`. Nothing has changed. Show the user the printed `bootstrap_dtrack.py` command (it uses `--password-out ~/.lde/dtrack-admin.local.txt` so `~/.lde/dtrack-admin.txt` is not overwritten). They run it. Then rerun `start_fresh.py --yes --dtrack-password-file ~/.lde/dtrack-admin.local.txt`. Auto mode still blocks the agent from rotating the admin password.
+**`factory / never bootstrapped`.** `admin`/`admin` still requires `FORCE_PASSWORD_CHANGE`. Nothing has changed. Give the user these commands; they run bootstrap (credential change; auto mode blocks the agent). Do not cat the password file.
+
+```bash
+DTRACK_ADMIN_PASSWORD=admin python3 scripts/bootstrap_dtrack.py --password-out ~/.lde/dtrack-admin.local.txt --no-aws
+```
+
+Dependency-Track UI (`http://127.0.0.1:8080`) username is `admin`. After bootstrap, copy the password to the clipboard (does not print it):
+
+```bash
+sed -n 2p ~/.lde/dtrack-admin.local.txt | tr -d '\n' | pbcopy
+```
+
+Then rerun `python3 scripts/start_fresh.py --yes --dtrack-password-file ~/.lde/dtrack-admin.local.txt`.
 
 **Password file does not match (already bootstrapped, not factory).** Nothing has changed yet.
 1. Read the audit log: `docker compose exec dtrack-apiserver cat /data/.dependency-track/dependency-track-audit.log`. It records every login and password change.
@@ -44,7 +56,7 @@ description: Start, restart or reset the local LDE stack (server.py + Dependency
 
 ## Handling secrets
 
-Read `~/.lde/dtrack-admin.txt` and `.settings.json` inside a Python process, and print counts, names and key prefixes only. This applies to any ad-hoc check you run against Dependency-Track, not just the script.
+Read `~/.lde/dtrack-admin.txt`, `~/.lde/dtrack-admin.local.txt` and `.settings.json` inside a Python process, and print counts, names and key prefixes only. This applies to any ad-hoc check you run against Dependency-Track, not just the script. Give the user the `pbcopy` one-liner above instead of printing the password.
 
 ## Undo
 

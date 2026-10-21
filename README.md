@@ -1,4 +1,4 @@
-# library-dependency-explorer
+# library-dependency-explorer (LDE)
 
 A locally hosted web app that indexes every direct and transitive dependency across your GitHub organizations — without cloning a single repository.
 
@@ -142,8 +142,8 @@ Docker runs only Dependency-Track. Ingest itself needs only Python and a GitHub 
 > The `dtrack-apiserver` Docker image is built locally from `Dockerfile.dtrack`. Export your proxy's CA cert into `certs/` **before** you run `docker compose up`, then follow [Corporate proxy / TLS interception](#corporate-proxy--tls-interception) to build the images. Without a proxy, skip it: `certs/` can stay empty and the build still succeeds.
 
 ```bash
-git clone <repo-url> library-dependency-explorer
-cd library-dependency-explorer
+git clone <repo-url> lde 
+cd lde 
 
 # 1) Start Dependency-Track (the SBOM database)
 #    Compose names the volume after this folder (<folder>_dtrack_data). A
@@ -162,6 +162,8 @@ DTRACK_ADMIN_PASSWORD=admin python3 scripts/bootstrap_dtrack.py \
 # Writes the local admin password and ~/.lde/dtrack-api-key.txt (mode 0600),
 # and copies the API key into .settings.json as dtrack_api_key.
 # Prints team, permissions, key prefix and length — never the password or key.
+# Dependency-Track UI (http://127.0.0.1:8080): username admin. Copy the password:
+sed -n 2p ~/.lde/dtrack-admin.local.txt | tr -d '\n' | pbcopy
 
 # 3) Configure local settings (skip the copy if bootstrap already created the file)
 cp -n .settings.json.example .settings.json
@@ -311,7 +313,7 @@ All app config lives in `.settings.json` (gitignored). Run `cp .settings.json.ex
 ## Directory layout
 
 ```
-library-dependency-explorer/
+lde/
 ├── server.py                # stdlib http.server, CORS to localhost, dotfile-blocking
 ├── docker-compose.yml       # Dependency-Track apiserver + frontend
 ├── .settings.json.example   # Config template (real secrets in .settings.json, gitignored)

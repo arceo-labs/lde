@@ -114,6 +114,12 @@ Then re-run:
 
 If `~/.lde/dtrack-admin.txt` exists, copy it first (`cp -np ~/.lde/dtrack-admin.txt ~/.lde/dtrack-admin.other.txt`); it may belong to another instance. `bootstrap_dtrack.py` writes the API key to `~/.lde/dtrack-api-key.txt` and into `.settings.json` as `dtrack_api_key`.
 
+Dependency-Track UI (`http://127.0.0.1:8080`) username is `admin`. Copy the new password to the clipboard without printing it:
+
+```bash
+sed -n 2p ~/.lde/dtrack-admin.local.txt | tr -d '\n' | pbcopy
+```
+
 **Admin login does not match a bootstrapped instance.** The password file is wrong, and factory `admin`/`admin` no longer works. The script stops before changing anything:
 
 ```
