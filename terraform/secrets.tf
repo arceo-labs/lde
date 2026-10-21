@@ -2,13 +2,13 @@
 # Populate actual values manually after `terraform apply`:
 #
 #   aws secretsmanager put-secret-value --secret-id lde/github-pat \
-#       --secret-string "github_pat_..."
+#       --secret-string '{"example-org": "github_pat_...", "another-org": "github_pat_..."}'
 #
 # NEVER put real values in .tf files or commit them to source control.
 
 resource "aws_secretsmanager_secret" "github_pat" {
   name                    = "lde/github-pat"
-  description             = "GitHub Fine-Grained PAT for Library Dependency Explorer — Repository permissions: Contents: Read-only (covers files, trees, and dependency-graph/sbom), Metadata: Read-only (auto-included, covers org repo listing)"
+  description             = "GitHub Fine-Grained PATs for Library Dependency Explorer, JSON object {org: token}, one per org — Repository permissions: Contents: Read-only (covers files, trees, and dependency-graph/sbom), Metadata: Read-only (auto-included, covers org repo listing)"
   recovery_window_in_days = 7
 }
 

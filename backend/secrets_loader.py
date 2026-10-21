@@ -15,9 +15,10 @@ environment variable (ECS sets these automatically on Fargate).
 Secret format
 -------------
 All secrets are plain strings except ``lde/basic-auth``, which is a JSON
-object of the form ``{"<username>": "<sha256_of_password>", ...}``.
+object of the form ``{"<username>": "<sha256_of_password>", ...}``, and
+``lde/github-pat``, a JSON object mapping each GitHub org to its PAT.
 
-    lde/github-pat        → settings key ``github_pat``
+    lde/github-pat       → settings key ``github_pats`` (JSON object ``{"<org>": "<token>"}``)
     lde/dtrack-api-key    → settings key ``dtrack_api_key``
     lde/gemini-api-key    → settings key ``gemini_api_key``
     lde/basic-auth        → settings key ``basic_auth_credentials`` (JSON object)
@@ -38,7 +39,7 @@ _ENABLED = os.environ.get('LDE_SECRETS_SOURCE', '').lower() == 'aws'
 
 # Mapping of Secrets Manager secret name → settings key
 _SECRET_MAP = {
-    'lde/github-pat': 'github_pat',
+    'lde/github-pat': 'github_pats',
     'lde/dtrack-api-key': 'dtrack_api_key',
     'lde/gemini-api-key': 'gemini_api_key',
     'lde/basic-auth': 'basic_auth_credentials',
@@ -233,6 +234,23 @@ def _cached_fetch(secret_name):
         return value
 
 
+def _parse_pats(raw):
+    """Parse the lde/github-pat secret into {org: token}; {} when malformed.
+
+    The value is never logged, only the fact that it was rejected.
+    """
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        doc = None
+    if not isinstance(doc, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in doc.items()):
+        logger.warning('secret lde/github-pat must be a JSON object of {org: token} '
+                       '(a plain-string token is the old format); ignoring it')
+        return {}
+    return doc
+
+
 def overlay(settings_dict):
     """Overlay AWS Secrets Manager values onto *settings_dict* in place.
 
@@ -246,6 +264,8 @@ def overlay(settings_dict):
     for secret_name, settings_key in _SECRET_MAP.items():
         try:
             value = _cached_fetch(secret_name)
+            if value and settings_key == 'github_pats':
+                value = _parse_pats(value)
             if value:
                 settings_dict[settings_key] = value
         except urllib.error.HTTPError as exc:

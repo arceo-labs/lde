@@ -510,6 +510,30 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('ORT is disabled in this deployment (no Docker socket)')
             raise ValueError(f'Invalid method {method!r}: must be one of {sorted(valid)}')
 
+        # An org copied from .settings.json.example is not a real target, even when a
+        # "*" token would let the call through.
+        # Check every org the run can reach. A mixed repos list (org/repo plus bare
+        # names) keeps requested_orgs at the defaults, so add the org/repo prefixes too;
+        # the stored org list is unchanged.
+        check_orgs = list(dict.fromkeys(
+            requested_orgs + [r.split('/')[0] for r in requested_repos if '/' in r]))
+        placeholders = settings_mod.placeholder_orgs(check_orgs)
+        if placeholders:
+            raise ValueError(
+                f'{", ".join(placeholders)} {"is an example org" if len(placeholders) == 1 else "are example orgs"} '
+                'from .settings.json.example. Replace default_orgs in Settings with your real orgs, '
+                'or pass orgs explicitly.')
+
+        # Fail fast: an org with no PAT (and no "*" entry) would only fail later,
+        # inside the pipeline, where it is logged and skipped.
+        if method == 'github_sbom':
+            missing = github_client.orgs_without_token(check_orgs)
+            if missing:
+                shown = ', '.join(str(o)[:80] for o in missing[:10])
+                raise ValueError(
+                    f'No GitHub PAT configured for: {shown}. Add one per org in Settings, '
+                    'or add a "*" entry to use one token for every other org.')
+
         # Optional run-level branch override. `use_default` (or an empty
         # branch) means "use each repo's configured/default branch", stored
         # as NULL. A provided branch is validated with the same rules the

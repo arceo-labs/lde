@@ -120,7 +120,7 @@ Gemini URL extraction works well for standard advisory sites but has two failure
 ```
 
 <!-- updated: gh CLI replaced by PAT-based urllib in github_client.py / gh_auth.py -->
-Each component is small, single-responsibility, and pure-stdlib Python — no Flask/FastAPI, no SDKs. All GitHub API calls use a Personal Access Token (`github_pat` setting) read from `.settings.json` or AWS Secrets Manager — no `gh` CLI subprocess is required.
+Each component is small, single-responsibility, and pure-stdlib Python — no Flask/FastAPI, no SDKs. All GitHub API calls use Personal Access Tokens (`github_pats` setting, one per org) read from `.settings.json` or AWS Secrets Manager — no `gh` CLI subprocess is required.
 
 ## Prerequisites
 
@@ -267,18 +267,16 @@ Rebuild the relevant image after every base-image version bump so the cert lands
 
 All app config lives in `.settings.json` (gitignored). Run `cp .settings.json.example .settings.json` to bootstrap.
 
-<!-- updated: added github_pat row; was missing from table despite being in ALLOWED_KEYS -->
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `default_orgs` | `[]` of string | `[]` | Orgs scanned when the **Start run** form is left blank. |
-| `github_pat` | string | `""` | GitHub fine-grained PAT (Contents: Read-only, Metadata: Read-only). Required in Fargate; set in Settings UI or `.settings.json`. Masked in the settings API response. |
+| `github_pats` | object | `{}` | GitHub PATs, `{"<org>": "<token>"}`, one per org (Contents: Read-only, Metadata: Read-only). A `"*"` key is the token for any org without its own entry. Required in Fargate; set in Settings UI or `.settings.json`. Masked in the settings API response. |
 | `dtrack_url` | string | `http://localhost:8081` | Dependency-Track API server URL. Used for all REST API calls. |
 | `dtrack_ui_url` | string | `http://localhost:8080` | Dependency-Track frontend UI URL. Used to construct deep links in Package Search. Separate from `dtrack_url` because DT ships as two Docker services on different ports. |
 | `dtrack_api_key` | string | `""` | DT API key (auto-masked in the settings UI). |
 | `gemini_api_key` | string | `""` | Google Gemini API key. Required for URL and file-upload extraction in Package Search. Auto-masked in the settings UI. Without this key the paste-list mode still works fully. |
 
-<!-- updated: GitHub auth is now PAT-based; github_pat is stored in .settings.json / Secrets Manager -->
-**GitHub authentication** uses a Personal Access Token stored under `github_pat` in `.settings.json` (or AWS Secrets Manager in Fargate). The Settings page in the UI shows a live PAT validation status via `GET /api/gh-status`.
+**GitHub authentication** uses one Personal Access Token per org, stored under `github_pats` in `.settings.json` (or the `lde/github-pat` secret in AWS Secrets Manager in Fargate). The old single `github_pat` key is no longer read. The Settings page in the UI shows a live PAT validation status via `GET /api/gh-status`.
 
 ## HTTP API
 

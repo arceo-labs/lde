@@ -25,7 +25,7 @@ description: Start, restart or reset the local LDE stack (server.py + Dependency
 
 4. **Run it in the background** (`run_in_background`), because the script stays attached as the server. Done when the output shows `LDE is running`.
     - Relay any `FAIL` line verbatim.
-    - Report `WARN GitHub` as "`github_pat` in `.settings.json` is rejected; `github_sbom` runs will fail".
+    - Report `WARN GitHub` as "`github_pats` in `.settings.json` is rejected; `github_sbom` runs will fail".
     - The server ends with this session. For a long-lived server, give the user the command to run in their own terminal.
 
 ## When the preview stops
