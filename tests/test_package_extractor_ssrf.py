@@ -12,7 +12,15 @@ from backend import package_extractor  # noqa: E402
 
 
 def _addrinfo(ip, port):
-    return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (ip, port))]
+    family = socket.AF_INET6 if ':' in ip else socket.AF_INET
+    return [(family, socket.SOCK_STREAM, 6, '', (ip, port))]
+
+
+def _addrinfos(ips, port):
+    rows = []
+    for ip in ips:
+        rows.extend(_addrinfo(ip, port))
+    return rows
 
 
 def test_validate_url_blocks_loopback():
@@ -153,6 +161,39 @@ def test_https_connects_to_resolved_ip_with_sni(monkeypatch):
     assert seen['timeout'] == package_extractor._FETCH_TIMEOUT_S
     headers = _FakeConn.instances[0].requests[0][2]
     assert headers['Host'] == 'advisory.example'
+
+
+def test_tries_next_validated_address_without_resolving_again(monkeypatch):
+    v6, v4 = '2001:4860:4860::8888', '8.8.8.8'
+    gai_calls = []
+    connects = []
+
+    def fake_gai(host, port, proto=0, **_kw):
+        gai_calls.append(host)
+        return _addrinfos([v6, v4], port)
+
+    def fake_create(addr, timeout=None):
+        connects.append(addr)
+        if addr[0] == v6:
+            raise OSError('Network is unreachable')
+        return _FakeSock()
+
+    def http_conn(*args, **kwargs):
+        conn = _FakeConn(*args, **kwargs)
+        conn._responses = [_FakeResp(
+            headers={'Content-Type': 'text/html; charset=utf-8'},
+            body=_html(),
+        )]
+        return conn
+
+    monkeypatch.setattr(socket, 'getaddrinfo', fake_gai)
+    monkeypatch.setattr(socket, 'create_connection', fake_create)
+    monkeypatch.setattr(package_extractor.http.client, 'HTTPConnection', http_conn)
+
+    html = package_extractor._fetch_url('http://advisory.example/cve')
+    assert 'word' in html
+    assert gai_calls == ['advisory.example']
+    assert connects == [(v6, 80), (v4, 80)]
 
 
 def test_redirect_to_blocked_ip_is_rejected_before_connect(monkeypatch):

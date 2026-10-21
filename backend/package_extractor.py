@@ -66,28 +66,36 @@ def _parse_fetch_url(url):
     return parsed, hostname, port
 
 
-def _resolve_public_ip(hostname, port):
-    """Resolve *hostname* once. Reject if any address is blocked; return one public IP."""
+def _resolve_public_ips(hostname, port):
+    """Resolve *hostname* once. Reject if any address is blocked; return public IPs.
+
+    Order from getaddrinfo is preserved, duplicates dropped. Callers must try
+    each address without resolving the hostname again.
+    """
     try:
         addrinfos = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
         raise ValueError(f'Cannot resolve hostname {hostname!r}: {exc}') from exc
     public = []
+    seen = set()
     for _family, _type, _proto, _canon, sockaddr in addrinfos:
         ip = ipaddress.ip_address(sockaddr[0])
         if _blocked_ip(ip):
             raise ValueError(f'URL resolves to blocked address {ip} ({hostname})')
-        public.append(str(ip))
+        key = str(ip)
+        if key not in seen:
+            seen.add(key)
+            public.append(key)
     if not public:
         raise ValueError(f'Cannot resolve hostname {hostname!r}: no addresses')
-    return public[0]
+    return public
 
 
 def _checked_url(url):
-    """Parse *url*, resolve once, and return (parsed, hostname, port, ip)."""
+    """Parse *url*, resolve once, and return (parsed, hostname, port, ips)."""
     parsed, hostname, port = _parse_fetch_url(url)
-    ip = _resolve_public_ip(hostname, port)
-    return parsed, hostname, port, ip
+    ips = _resolve_public_ips(hostname, port)
+    return parsed, hostname, port, ips
 
 
 def _validate_url(url):
@@ -109,13 +117,22 @@ def _response_charset(resp):
     return msg.get_content_charset() or 'utf-8'
 
 
-def _connect_pinned(parsed, hostname, port, ip, timeout):
-    """Open a socket to *ip* and attach it to an HTTP(S) connection.
+def _connect_pinned(parsed, hostname, port, ips, timeout):
+    """Open a socket to a validated IP and attach it to an HTTP(S) connection.
 
-    TLS uses *hostname* for SNI and certificate verification. The hostname is
-    never passed to a client that would resolve it again.
+    Tries each address from the already-resolved list; does not look up
+    *hostname* again. TLS uses *hostname* for SNI and certificate verification.
     """
-    sock = socket.create_connection((ip, port), timeout)
+    last_exc = None
+    sock = None
+    for ip in ips:
+        try:
+            sock = socket.create_connection((ip, port), timeout)
+            break
+        except OSError as exc:
+            last_exc = exc
+    if sock is None:
+        raise last_exc if last_exc is not None else OSError('no addresses to connect')
     try:
         if parsed.scheme == 'https':
             context = ssl.create_default_context()
@@ -140,8 +157,8 @@ def _http_get_pinned(url, headers, timeout=_FETCH_TIMEOUT_S):
     """
     current = url
     for _ in range(_MAX_REDIRECTS + 1):
-        parsed, hostname, port, ip = _checked_url(current)
-        conn = _connect_pinned(parsed, hostname, port, ip, timeout)
+        parsed, hostname, port, ips = _checked_url(current)
+        conn = _connect_pinned(parsed, hostname, port, ips, timeout)
         try:
             req_headers = dict(headers)
             req_headers['Host'] = f'[{hostname}]' if ':' in hostname else hostname
