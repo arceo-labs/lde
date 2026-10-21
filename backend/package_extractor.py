@@ -8,15 +8,18 @@ Returns a plain list of package name strings (one per package).
 """
 
 import concurrent.futures
+import http.client
 import ipaddress
 import json
 import re
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
+from email.message import EmailMessage
 from html.parser import HTMLParser
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from . import log as log_mod
 
@@ -27,30 +30,137 @@ logger = log_mod.get('pkg_extractor')
 # SSRF protection
 # ---------------------------------------------------------------------------
 
-def _validate_url(url):
-    """Raise ValueError if *url* targets a private/reserved/loopback address."""
+_FETCH_TIMEOUT_S = 30
+_MAX_REDIRECTS = 5
+
+
+# RFC 6598 shared/CGNAT address space (100.64.0.0/10). Some cloud providers
+# route internal services here; ipaddress.is_private/is_reserved do not flag
+# it, so it needs an explicit check.
+_SHARED_ADDRESS_SPACE_V4 = ipaddress.ip_network('100.64.0.0/10')
+
+
+def _blocked_ip(ip):
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        return True
+    if ip.is_multicast or ip.is_unspecified:
+        return True
+    if ip.version == 4 and ip in _SHARED_ADDRESS_SPACE_V4:
+        return True
+    return False
+
+
+def _parse_fetch_url(url):
+    """Return a parsed http(s) URL on port 80/443, or raise ValueError."""
     parsed = urlparse(url)
     hostname = parsed.hostname
     port = parsed.port or (443 if parsed.scheme == 'https' else 80)
-
-    if not hostname:
-        raise ValueError(f'URL has no hostname: {url}')
     if parsed.scheme not in ('http', 'https'):
         raise ValueError(f'URL scheme {parsed.scheme!r} is not allowed (only http/https)')
+    if not hostname:
+        raise ValueError(f'URL has no hostname: {url}')
     if port not in (80, 443):
         raise ValueError(f'URL port {port} is not allowed (only 80 and 443)')
+    return parsed, hostname, port
 
+
+def _resolve_public_ip(hostname, port):
+    """Resolve *hostname* once. Reject if any address is blocked; return one public IP."""
     try:
         addrinfos = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
         raise ValueError(f'Cannot resolve hostname {hostname!r}: {exc}') from exc
-
+    public = []
     for _family, _type, _proto, _canon, sockaddr in addrinfos:
         ip = ipaddress.ip_address(sockaddr[0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        if _blocked_ip(ip):
             raise ValueError(f'URL resolves to blocked address {ip} ({hostname})')
+        public.append(str(ip))
+    if not public:
+        raise ValueError(f'Cannot resolve hostname {hostname!r}: no addresses')
+    return public[0]
 
+
+def _checked_url(url):
+    """Parse *url*, resolve once, and return (parsed, hostname, port, ip)."""
+    parsed, hostname, port = _parse_fetch_url(url)
+    ip = _resolve_public_ip(hostname, port)
+    return parsed, hostname, port, ip
+
+
+def _validate_url(url):
+    """Raise ValueError if *url* targets a private/reserved/loopback address."""
+    _checked_url(url)
     return url
+
+
+def _request_path(parsed):
+    path = parsed.path or '/'
+    if parsed.query:
+        path = f'{path}?{parsed.query}'
+    return path
+
+
+def _response_charset(resp):
+    msg = EmailMessage()
+    msg['content-type'] = resp.getheader('Content-Type') or 'text/html'
+    return msg.get_content_charset() or 'utf-8'
+
+
+def _connect_pinned(parsed, hostname, port, ip, timeout):
+    """Open a socket to *ip* and attach it to an HTTP(S) connection.
+
+    TLS uses *hostname* for SNI and certificate verification. The hostname is
+    never passed to a client that would resolve it again.
+    """
+    sock = socket.create_connection((ip, port), timeout)
+    try:
+        if parsed.scheme == 'https':
+            context = ssl.create_default_context()
+            sock = context.wrap_socket(sock, server_hostname=hostname)
+            conn = http.client.HTTPSConnection(
+                hostname, port, timeout=timeout, context=context)
+        else:
+            conn = http.client.HTTPConnection(hostname, port, timeout=timeout)
+    except Exception:
+        sock.close()
+        raise
+    conn.sock = sock
+    return conn
+
+
+def _http_get_pinned(url, headers, timeout=_FETCH_TIMEOUT_S):
+    """GET *url* by connecting only to a once-validated IP. Follow redirects.
+
+    Each hop (including Location targets) is resolved and checked before
+    connect. Redirects are followed in Python so urlopen cannot re-resolve
+    DNS or land on a blocked address.
+    """
+    current = url
+    for _ in range(_MAX_REDIRECTS + 1):
+        parsed, hostname, port, ip = _checked_url(current)
+        conn = _connect_pinned(parsed, hostname, port, ip, timeout)
+        try:
+            req_headers = dict(headers)
+            req_headers['Host'] = f'[{hostname}]' if ':' in hostname else hostname
+            conn.request('GET', _request_path(parsed), headers=req_headers)
+            resp = conn.getresponse()
+            if 300 <= resp.status < 400:
+                location = resp.getheader('Location')
+                resp.read()
+                if not location:
+                    raise ValueError(f'Redirect from {hostname} had no Location')
+                current = urljoin(current, location)
+                continue
+            if resp.status >= 400:
+                reason = resp.reason or str(resp.status)
+                resp.read()
+                raise OSError(reason)
+            body = resp.read()
+            return body.decode(_response_charset(resp), errors='replace')
+        finally:
+            conn.close()
+    raise ValueError(f'Too many redirects fetching {url}')
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +296,7 @@ _SPARSE_THRESHOLD = 200  # chars of visible text below which we retry with next 
 
 
 def _fetch_url(url):
-    """Fetch *url* with SSRF checks on initial and redirect URL.
+    """Fetch *url* with SSRF checks on initial and redirect hops.
 
     Tries multiple user-agents in order, stopping at the first response that
     yields more than _SPARSE_THRESHOLD characters of visible text.  This handles
@@ -195,21 +305,18 @@ def _fetch_url(url):
 
     Returns the best HTML string found.
     """
-    _validate_url(url)
     last_html = ''
     last_exc = None
     for ua in _USER_AGENTS:
-        req = urllib.request.Request(url, headers={
+        headers = {
             'User-Agent': ua,
             'Accept': 'text/html,application/xhtml+xml,*/*',
-        })
+        }
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                if resp.url != url:
-                    _validate_url(resp.url)
-                charset = resp.headers.get_content_charset() or 'utf-8'
-                html = resp.read().decode(charset, errors='replace')
-        except urllib.error.URLError as exc:
+            html = _http_get_pinned(url, headers)
+        except ValueError:
+            raise
+        except (OSError, http.client.HTTPException, ssl.SSLError) as exc:
             last_exc = exc
             continue
 
@@ -221,7 +328,8 @@ def _fetch_url(url):
         last_html = html  # keep as fallback
 
     if not last_html and last_exc:
-        raise ValueError(f'Failed to fetch URL: {last_exc.reason}')
+        reason = getattr(last_exc, 'reason', last_exc)
+        raise ValueError(f'Failed to fetch URL: {reason}')
     return last_html
 
 
