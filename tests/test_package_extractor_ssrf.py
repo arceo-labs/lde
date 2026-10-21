@@ -217,6 +217,68 @@ def test_too_many_redirects(monkeypatch):
         package_extractor._fetch_url('http://advisory.example/start')
 
 
+def test_304_is_not_treated_as_redirect(monkeypatch):
+    ip = '8.8.8.8'
+    statuses = [304, 200]
+    locations = []
+
+    def fake_gai(host, port, proto=0, **_kw):
+        locations.append(host)
+        return _addrinfo(ip, port)
+
+    def http_conn(*args, **kwargs):
+        conn = _FakeConn(*args, **kwargs)
+        status = statuses.pop(0)
+        conn._responses = [_FakeResp(
+            status=status,
+            reason='Not Modified' if status == 304 else 'OK',
+            headers={'Content-Type': 'text/html; charset=utf-8'},
+            body=_html() if status == 200 else b'',
+        )]
+        return conn
+
+    monkeypatch.setattr(socket, 'getaddrinfo', fake_gai)
+    monkeypatch.setattr(socket, 'create_connection', lambda *a, **k: _FakeSock())
+    monkeypatch.setattr(package_extractor.http.client, 'HTTPConnection', http_conn)
+
+    html = package_extractor._fetch_url('http://advisory.example/cve')
+    assert 'word' in html
+    assert locations == ['advisory.example', 'advisory.example']
+    assert statuses == []
+
+
+def test_305_location_is_not_followed(monkeypatch):
+    public_ip = '8.8.8.8'
+    connects = []
+
+    def fake_gai(host, port, proto=0, **_kw):
+        if host != 'advisory.example':
+            raise AssertionError(f'resolved unexpected host {host}')
+        return _addrinfo(public_ip, port)
+
+    def fake_create(addr, timeout=None):
+        connects.append(addr)
+        return _FakeSock()
+
+    def http_conn(*args, **kwargs):
+        conn = _FakeConn(*args, **kwargs)
+        conn._responses = [_FakeResp(
+            status=305,
+            reason='Use Proxy',
+            headers={'Location': 'http://169.254.170.2/'},
+            body=b'',
+        )]
+        return conn
+
+    monkeypatch.setattr(socket, 'getaddrinfo', fake_gai)
+    monkeypatch.setattr(socket, 'create_connection', fake_create)
+    monkeypatch.setattr(package_extractor.http.client, 'HTTPConnection', http_conn)
+
+    with pytest.raises(ValueError, match='Failed to fetch URL'):
+        package_extractor._fetch_url('http://advisory.example/cve')
+    assert connects == [(public_ip, 80), (public_ip, 80)]
+
+
 def test_http_error_retries_next_user_agent(monkeypatch):
     ip = '8.8.8.8'
     statuses = [503, 200]

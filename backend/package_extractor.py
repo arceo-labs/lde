@@ -32,6 +32,8 @@ logger = log_mod.get('pkg_extractor')
 
 _FETCH_TIMEOUT_S = 30
 _MAX_REDIRECTS = 5
+# Same set urllib.request.HTTPRedirectHandler follows for GET.
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
 # RFC 6598 shared/CGNAT address space (100.64.0.0/10). Some cloud providers
@@ -145,14 +147,14 @@ def _http_get_pinned(url, headers, timeout=_FETCH_TIMEOUT_S):
             req_headers['Host'] = f'[{hostname}]' if ':' in hostname else hostname
             conn.request('GET', _request_path(parsed), headers=req_headers)
             resp = conn.getresponse()
-            if 300 <= resp.status < 400:
+            if resp.status in _REDIRECT_STATUSES:
                 location = resp.getheader('Location')
                 resp.read()
                 if not location:
                     raise ValueError(f'Redirect from {hostname} had no Location')
                 current = urljoin(current, location)
                 continue
-            if resp.status >= 400:
+            if resp.status >= 300:
                 reason = resp.reason or str(resp.status)
                 resp.read()
                 raise OSError(reason)
