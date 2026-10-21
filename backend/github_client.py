@@ -86,14 +86,31 @@ def _get_token(org):
                   f'or add a "*" entry to use one token for every other org.')
 
 
+def orgs_without_token(orgs):
+    """Return the orgs in *orgs* that have neither their own PAT nor a ``"*"`` entry."""
+    pats = settings_mod.github_tokens(settings_mod.load_settings())
+    if '*' in pats:
+        return []
+    seen, missing = set(), []
+    for org in orgs:
+        key = org.lower() if isinstance(org, str) else ''
+        if key not in pats and key not in seen:
+            seen.add(key)
+            missing.append(org if isinstance(org, str) else repr(org))
+    return missing
+
+
 def _make_headers(token):
+    # Fail closed: a request without a token would go to GitHub unauthenticated.
+    if not token:
+        raise GhError('No GitHub PAT supplied for this request; refusing to call GitHub '
+                      'unauthenticated.')
     headers = {
         'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': _API_VERSION,
         'User-Agent': 'LibraryDependencyExplorer/1.0',
+        'Authorization': f'Bearer {token}',
     }
-    if token:
-        headers['Authorization'] = f'Bearer {token}'
     return headers
 
 

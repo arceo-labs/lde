@@ -34,7 +34,8 @@ def no_default_orgs(monkeypatch, tmp_path):
     """Fresh DB, empty default_orgs (a new deploy), and no pipeline thread."""
     monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'create_run.db'))
     db.init_db()
-    monkeypatch.setattr(server.settings_mod, 'load_settings', lambda: {'default_orgs': []})
+    monkeypatch.setattr(server.settings_mod, 'load_settings',
+                        lambda: {'default_orgs': [], 'github_pats': {'example-org': 'github_pat_test'}})
     started = []
     monkeypatch.setattr(server.pipeline, 'start_in_background', started.append)
     return started
@@ -63,3 +64,31 @@ def test_bare_repo_without_orgs_is_rejected(no_default_orgs):
     with pytest.raises(ValueError, match='No orgs provided'):
         handler.handle_create_run((), {})
     assert no_default_orgs == []
+
+
+def _with_settings(monkeypatch, **cfg):
+    monkeypatch.setattr(server.settings_mod, 'load_settings', lambda: cfg)
+
+
+def test_org_without_pat_is_rejected_before_run_is_created(no_default_orgs, monkeypatch):
+    _with_settings(monkeypatch, default_orgs=[], github_pats={'example-org': 'github_pat_test'})
+    handler = _make_handler({'repos': ['other-org/svc'], 'method': 'github_sbom'})
+    with pytest.raises(ValueError, match='No GitHub PAT configured for: other-org'):
+        handler.handle_create_run((), {})
+    assert no_default_orgs == []
+
+
+def test_default_orgs_without_pats_are_rejected(no_default_orgs, monkeypatch):
+    _with_settings(monkeypatch, default_orgs=['example-org', 'another-org'],
+                   github_pats={'example-org': '', 'another-org': ''})
+    handler = _make_handler({'method': 'github_sbom'})
+    with pytest.raises(ValueError, match='example-org, another-org'):
+        handler.handle_create_run((), {})
+    assert no_default_orgs == []
+
+
+def test_star_entry_allows_any_org(no_default_orgs, monkeypatch):
+    _with_settings(monkeypatch, default_orgs=[], github_pats={'*': 'ghp_test'})
+    handler = _make_handler({'repos': ['other-org/svc'], 'method': 'github_sbom'})
+    handler.handle_create_run((), {})
+    assert handler._sent_status == 202

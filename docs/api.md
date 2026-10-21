@@ -166,7 +166,7 @@ curl -s -u admin:password -X POST http://localhost:8002/api/runs \
 **Response:** `202` — `{"run_id": "<hex>"}`
 
 **Errors:**
-- `400` — invalid `method`, invalid repo name format, invalid `branch` name, or no orgs configured
+- `400` — invalid `method`, invalid repo name format, invalid `branch` name, no orgs configured, or (for `github_sbom`) an org with no entry in `github_pats` and no `"*"` entry; the message lists those orgs
 
 ---
 

@@ -161,3 +161,18 @@ def test_save_preserves_legacy_github_pat_on_disk(tmp_path):
     assert stored['github_pat'] == 'legacy-token'
     assert stored['dtrack_url'] == 'http://new'
     assert notice
+
+
+def test_orgs_without_token_lists_uncovered_orgs():
+    with _cfg(github_pats={'acme': 't'}):
+        assert github_client.orgs_without_token(['Acme', 'b', 'B', 'c']) == ['b', 'c']
+    with _cfg(github_pats={'acme': 't', '*': 'any'}):
+        assert github_client.orgs_without_token(['b']) == []
+    with _cfg(github_pats={}):
+        assert github_client.orgs_without_token(['b']) == ['b']
+
+
+def test_headers_refuse_to_go_out_unauthenticated():
+    with pytest.raises(github_client.GhError):
+        github_client._make_headers(None)
+    assert github_client._make_headers('t')['Authorization'] == 'Bearer t'

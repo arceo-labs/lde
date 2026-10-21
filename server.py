@@ -510,6 +510,16 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('ORT is disabled in this deployment (no Docker socket)')
             raise ValueError(f'Invalid method {method!r}: must be one of {sorted(valid)}')
 
+        # Fail fast: an org with no PAT (and no "*" entry) would only fail later,
+        # inside the pipeline, where it is logged and skipped.
+        if method == 'github_sbom':
+            missing = github_client.orgs_without_token(requested_orgs)
+            if missing:
+                shown = ', '.join(str(o)[:80] for o in missing[:10])
+                raise ValueError(
+                    f'No GitHub PAT configured for: {shown}. Add one per org in Settings, '
+                    'or add a "*" entry to use one token for every other org.')
+
         # Optional run-level branch override. `use_default` (or an empty
         # branch) means "use each repo's configured/default branch", stored
         # as NULL. A provided branch is validated with the same rules the
