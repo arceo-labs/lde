@@ -402,9 +402,10 @@ def secret_shape(secret_id, value):
         except ValueError:
             return 'FAIL', f'{secret_id} is not JSON: write an object of {{"<org>": "<token>"}}'
         if not isinstance(doc, dict) or not doc or not all(
-                isinstance(k, str) and re.fullmatch(r'[A-Za-z0-9._-]+', k)
-                and isinstance(t, str) and t for k, t in doc.items()):
-            return 'FAIL', f'{secret_id} must map each GitHub org to a non-empty token'
+                isinstance(k, str) and re.fullmatch(r'\*|[A-Za-z0-9._-]+', k)
+                and isinstance(t, str) and t and t == t.strip() for k, t in doc.items()):
+            return 'FAIL', (f'{secret_id} must map each GitHub org (or "*") to a non-empty token '
+                            'with no surrounding whitespace')
         odd = sorted(k for k, t in doc.items() if not t.startswith(('github_pat_', 'ghp_')))
         if odd:
             return 'WARN', f'{secret_id}: {len(doc)} org(s); no github_pat_ or ghp_ prefix for {", ".join(odd)}'

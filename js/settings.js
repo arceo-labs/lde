@@ -218,8 +218,8 @@ function patRowHtml(org, masked, isNew = false) {
   const saved = Boolean(org) && !isNew;
   const title = org === '*' ? ' title="Used for any org without its own row"' : '';
   return `<div class="pat-row"${saved ? ' data-saved="1"' : ''}>
-    <input class="pat-org" type="text" placeholder="org name" autocomplete="off" value="${escapeHtml(org)}"${title}${org ? ' readonly' : ''}>
-    <input class="pat-token" type="password" autocomplete="off" placeholder="${escapeHtml(saved ? `${masked} (saved — type to replace)` : 'github_pat_…')}">
+    <input class="pat-org" type="text" aria-label="GitHub org" placeholder="org name" autocomplete="off" value="${escapeHtml(org)}"${title}${org ? ' readonly' : ''}>
+    <input class="pat-token" type="password" aria-label="${escapeHtml(org ? `Token for ${org}` : 'GitHub token')}" autocomplete="off" placeholder="${escapeHtml(saved ? `${masked} (saved — type to replace)` : 'github_pat_…')}">
     <button type="button" class="secondary pat-remove">Remove</button>
   </div>`;
 }

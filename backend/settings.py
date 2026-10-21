@@ -165,7 +165,8 @@ def merge_github_pats(existing, patch):
     """
     if not isinstance(patch, dict):
         raise ValueError('github_pats must be a JSON object of {org: token}')
-    merged = dict(existing) if isinstance(existing, dict) else {}
+    merged = ({k.lower(): v for k, v in existing.items() if isinstance(k, str)}
+              if isinstance(existing, dict) else {})
     for owner, token in patch.items():
         if not isinstance(owner, str) or not _PAT_OWNER_RE.match(owner):
             raise ValueError('github_pats keys must be GitHub org or user names, or *')

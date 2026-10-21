@@ -28,7 +28,7 @@ in all API responses. Their full values are never returned to the browser.
 | `default_orgs` | array of strings | `[]` | No |
 
 **`github_pats`** — One fine-grained PAT per org, as `{"<org>": "<token>"}`. Each needs Contents:
-Read-only and Metadata: Read-only. Required in Fargate; optional locally if `gh` is authenticated.
+Read-only and Metadata: Read-only. Required in Fargate and locally.
 An org with no entry is an error, never an unauthenticated call. The key `"*"` is the token for
 any org without its own entry (for example a classic PAT that spans orgs).
 `PUT /api/settings` merges per org: send `""` to remove one. `LDE_GITHUB_PATS` (a JSON object)

@@ -124,6 +124,12 @@ def test_merge_adds_updates_removes():
     assert out == {'a': 't1b', 'c': 't3'}
 
 
+def test_merge_normalizes_existing_mixed_case_keys():
+    # A hand-edited "Acme" entry must still be removed or replaced by the lower-cased UI key.
+    assert settings_mod.merge_github_pats({'Acme': 't1', 'B': 't2'}, {'acme': ''}) == {'b': 't2'}
+    assert settings_mod.merge_github_pats({'Acme': 't1'}, {'acme': 't2'}) == {'acme': 't2'}
+
+
 def test_merge_ignores_masked_values():
     out = settings_mod.merge_github_pats({'a': 'github_pat_real'}, {'a': 'gith…'})
     assert out == {'a': 'github_pat_real'}

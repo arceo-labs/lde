@@ -64,6 +64,7 @@ curl -su "$BASIC_AUTH" -X POST "$ALB/api/dtrack/package-search" \
      --query SecretString --output text \
      --region us-east-1 --profile your-profile \
      | jq --arg t "github_pat_XXXX..." '.["example-org"] = $t' \
+     | tr -d '\n' \
      | aws secretsmanager put-secret-value \
          --secret-id lde/github-pat \
          --secret-string file:///dev/stdin \

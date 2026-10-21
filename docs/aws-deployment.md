@@ -324,6 +324,7 @@ jq -n \
   --arg a "$(op item get <item-id-a> --vault <vault-name> --fields label=password --reveal)" \
   --arg b "$(op item get <item-id-b> --vault <vault-name> --fields label=password --reveal)" \
   '{"example-org": $a, "another-org": $b}' \
+  | tr -d '\n' \
   | aws secretsmanager put-secret-value \
       --secret-id lde/github-pat \
       --secret-string file:///dev/stdin \
