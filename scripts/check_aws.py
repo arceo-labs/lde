@@ -396,8 +396,19 @@ def secret_shape(secret_id, value):
                 isinstance(h, str) and re.fullmatch(r'[0-9a-f]{64}', h) for h in doc.values()):
             return 'FAIL', f'{secret_id} must map each username to a 64-char sha256 hex'
         return 'OK', f'{secret_id}: {len(doc)} user(s), sha256 hashes'
-    if secret_id == 'lde/github-pat' and not value.startswith(('github_pat_', 'ghp_')):
-        return 'WARN', f'{secret_id}: {len(value)} chars, no github_pat_ or ghp_ prefix'
+    if secret_id == 'lde/github-pat':
+        try:
+            doc = json.loads(value)
+        except ValueError:
+            return 'FAIL', f'{secret_id} is not JSON: write an object of {{"<org>": "<token>"}}'
+        if not isinstance(doc, dict) or not doc or not all(
+                isinstance(k, str) and re.fullmatch(r'[A-Za-z0-9._-]+', k)
+                and isinstance(t, str) and t for k, t in doc.items()):
+            return 'FAIL', f'{secret_id} must map each GitHub org to a non-empty token'
+        odd = sorted(k for k, t in doc.items() if not t.startswith(('github_pat_', 'ghp_')))
+        if odd:
+            return 'WARN', f'{secret_id}: {len(doc)} org(s); no github_pat_ or ghp_ prefix for {", ".join(odd)}'
+        return 'OK', f'{secret_id}: {len(doc)} org(s)'
     return 'OK', f'{secret_id}: {len(value)} chars'
 
 

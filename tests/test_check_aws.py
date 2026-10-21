@@ -89,11 +89,13 @@ def test_allowlist_skipped_for_internal_alb():
 # --- secret shape ----------------------------------------------------------
 
 @pytest.mark.parametrize('secret_id,value,level', [
-    ('lde/github-pat', 'REPLACE_ME', 'FAIL'),
+    ('lde/github-pat', '{}', 'FAIL'),
     ('lde/github-pat', '', 'FAIL'),
-    ('lde/github-pat', 'github_pat_' + 'x' * 82 + '\n', 'FAIL'),
-    ('lde/github-pat', 'github_pat_' + 'x' * 82, 'OK'),
-    ('lde/github-pat', 'something-else-40-chars-long-xxxxxxxxxxxx', 'WARN'),
+    ('lde/github-pat', 'github_pat_' + 'x' * 82, 'FAIL'),
+    ('lde/github-pat', '{"acme": "github_pat_' + 'x' * 82 + '"}\n', 'FAIL'),
+    ('lde/github-pat', '{"acme": "github_pat_' + 'x' * 82 + '"}', 'OK'),
+    ('lde/github-pat', '{"bad/org": "github_pat_x"}', 'FAIL'),
+    ('lde/github-pat', '{"acme": "something-else-40-chars-long-xxxxxxxxxxxx"}', 'WARN'),
     ('lde/gemini-api-key', 'REPLACE_ME', 'WARN'),
     ('lde/gemini-api-key', 'k' * 39, 'OK'),
     ('lde/dtrack-api-key', 'REPLACE_ME', 'FAIL'),
