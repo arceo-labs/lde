@@ -19,7 +19,7 @@ To confirm a rotation, wait a minute before testing.
 
 | Secret ID | Setting key | What it authenticates |
 |---|---|---|
-| `lde/github-pat` | `github_pat` | GitHub API — reads repo trees, fetches manifests, SBOM endpoint |
+| `lde/github-pat` | `github_pats` | GitHub API — one PAT per org (JSON object): reads repo trees, fetches manifests, SBOM endpoint |
 | `lde/dtrack-api-key` | `dtrack_api_key` | Dependency-Track API — BOM upload, component search |
 | `lde/gemini-api-key` | `gemini_api_key` | Google Gemini — package extraction from URLs/files |
 | `lde/basic-auth` | `basic_auth_credentials` | HTTP Basic Auth gate on all LDE endpoints |
@@ -46,7 +46,7 @@ curl -su "$BASIC_AUTH" -X POST "$ALB/api/dtrack/package-search" \
 
 ---
 
-## Rotating `github_pat`
+## Rotating a `github_pats` token
 
 1. Generate a new fine-grained PAT on GitHub:
    - Settings → Developer settings → Personal access tokens → Fine-grained tokens
@@ -57,20 +57,24 @@ curl -su "$BASIC_AUTH" -X POST "$ALB/api/dtrack/package-search" \
 2. For each SSO org, authorize the new token:
    - github.com → Settings → Personal access tokens → authorize each org
 
-3. Put the new value in Secrets Manager:
+3. Replace that org's entry in the JSON secret (other orgs are kept; requires `jq`):
 
    ```bash
-   aws secretsmanager put-secret-value \
-     --secret-id lde/github-pat \
-     --secret-string "github_pat_XXXX..." \
-     --region us-east-1 --profile your-profile
+   aws secretsmanager get-secret-value --secret-id lde/github-pat \
+     --query SecretString --output text \
+     --region us-east-1 --profile your-profile \
+     | jq --arg t "github_pat_XXXX..." '.["example-org"] = $t' \
+     | aws secretsmanager put-secret-value \
+         --secret-id lde/github-pat \
+         --secret-string file:///dev/stdin \
+         --region us-east-1 --profile your-profile
    ```
 
 4. Verify (within a few seconds of propagation):
 
    ```bash
    curl -su "$BASIC_AUTH" "$ALB/api/gh-status" | python3 -m json.tool
-   # Expect: "logged_in": true, "accounts"[0].user = <your new token's owner>
+   # Expect: "logged_in": true, one "accounts" entry per org with "ok": true
    ```
 
 5. Revoke the old PAT on GitHub.

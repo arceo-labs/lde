@@ -117,7 +117,7 @@ Run `python3 scripts/start_fresh.py --keep-dtrack` to clear LDE only, or recover
 [start_fresh] WARN GitHub: PAT is configured but authentication failed (HTTP 401). ... github_sbom runs will fail.
 ```
 
-Set a valid `github_pat` in `.settings.json`.
+Set a valid token per org under `github_pats` in `.settings.json`.
 
 ## Recover the Dependency-Track admin password
 

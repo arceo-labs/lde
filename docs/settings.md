@@ -15,7 +15,7 @@ Each key is resolved in this priority order (highest wins):
 3. `.settings.json` on disk
 4. Built-in default
 
-Sensitive keys (`github_pat`, `dtrack_api_key`, `gemini_api_key`) are truncated to 4 chars + `…`
+Sensitive keys (`github_pats`, `dtrack_api_key`, `gemini_api_key`) are truncated to 4 chars + `…`
 in all API responses. Their full values are never returned to the browser.
 
 ---
@@ -24,14 +24,16 @@ in all API responses. Their full values are never returned to the browser.
 
 | Key | Type | Default | Sensitive |
 |---|---|---|---|
-| `github_pat` | string | `""` | Yes — masked in API responses |
+| `github_pats` | object `{org: token}` | `{}` | Yes — each token masked in API responses |
 | `default_orgs` | array of strings | `[]` | No |
 
-**`github_pat`** — Fine-grained Personal Access Token for the GitHub API. Required permissions:
-Contents: Read-only and Metadata: Read-only. Required in Fargate; optional locally if you are
-already authenticated with the `gh` CLI.
-
-In AWS: stored as plain string in `lde/github-pat`.
+**`github_pats`** — One fine-grained PAT per org, as `{"<org>": "<token>"}`. Each needs Contents:
+Read-only and Metadata: Read-only. Required in Fargate; optional locally if `gh` is authenticated.
+An org with no entry is an error, never an unauthenticated call. The key `"*"` is the token for
+any org without its own entry (for example a classic PAT that spans orgs).
+`PUT /api/settings` merges per org: send `""` to remove one. `LDE_GITHUB_PATS` (a JSON object)
+overrides the map. In AWS, the secret `lde/github-pat` holds the same JSON object
+([Step 4](aws-deployment.md)).
 
 **`default_orgs`** — Org names pre-filled in the Ingest UI. Does not restrict which orgs can be
 scanned — it only sets the default input value.
