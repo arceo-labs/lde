@@ -116,6 +116,15 @@ def _html(n_words=50):
     return ('<html><p>' + 'word ' * n_words + '</p></html>').encode()
 
 
+def test_host_header_omits_scheme_default_and_keeps_explicit_port():
+    assert package_extractor._host_header('example.com', 80, 'http') == 'example.com'
+    assert package_extractor._host_header('example.com', 443, 'https') == 'example.com'
+    assert package_extractor._host_header('example.com', 443, 'http') == 'example.com:443'
+    assert package_extractor._host_header('example.com', 80, 'https') == 'example.com:80'
+    assert package_extractor._host_header('2001:db8::1', 80, 'http') == '[2001:db8::1]'
+    assert package_extractor._host_header('2001:db8::1', 443, 'http') == '[2001:db8::1]:443'
+
+
 def test_https_connects_to_resolved_ip_with_sni(monkeypatch):
     ip = '8.8.8.8'
     seen = {}
@@ -161,6 +170,38 @@ def test_https_connects_to_resolved_ip_with_sni(monkeypatch):
     assert seen['timeout'] == package_extractor._FETCH_TIMEOUT_S
     headers = _FakeConn.instances[0].requests[0][2]
     assert headers['Host'] == 'advisory.example'
+
+
+def test_http_explicit_443_is_in_host_header(monkeypatch):
+    ip = '8.8.8.8'
+    seen = {}
+    _FakeConn.instances = []
+
+    def fake_gai(host, port, proto=0, **_kw):
+        seen['gai_port'] = port
+        return _addrinfo(ip, port)
+
+    def fake_create(addr, timeout=None):
+        seen['addr'] = addr
+        return _FakeSock()
+
+    def http_conn(*args, **kwargs):
+        conn = _FakeConn(*args, **kwargs)
+        conn._responses = [_FakeResp(
+            headers={'Content-Type': 'text/html; charset=utf-8'},
+            body=_html(),
+        )]
+        return conn
+
+    monkeypatch.setattr(socket, 'getaddrinfo', fake_gai)
+    monkeypatch.setattr(socket, 'create_connection', fake_create)
+    monkeypatch.setattr(package_extractor.http.client, 'HTTPConnection', http_conn)
+
+    html = package_extractor._fetch_url('http://advisory.example:443/cve')
+    assert 'word' in html
+    assert seen['gai_port'] == 443
+    assert seen['addr'] == (ip, 443)
+    assert _FakeConn.instances[-1].requests[0][2]['Host'] == 'advisory.example:443'
 
 
 def test_tries_next_validated_address_without_resolving_again(monkeypatch):

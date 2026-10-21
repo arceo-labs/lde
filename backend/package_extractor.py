@@ -111,6 +111,15 @@ def _request_path(parsed):
     return path
 
 
+def _host_header(hostname, port, scheme):
+    """Host header: IPv6 in brackets; include port when it is not the scheme default."""
+    host = f'[{hostname}]' if ':' in hostname else hostname
+    default = 443 if scheme == 'https' else 80
+    if port != default:
+        return f'{host}:{port}'
+    return host
+
+
 def _response_charset(resp):
     msg = EmailMessage()
     msg['content-type'] = resp.getheader('Content-Type') or 'text/html'
@@ -161,7 +170,7 @@ def _http_get_pinned(url, headers, timeout=_FETCH_TIMEOUT_S):
         conn = _connect_pinned(parsed, hostname, port, ips, timeout)
         try:
             req_headers = dict(headers)
-            req_headers['Host'] = f'[{hostname}]' if ':' in hostname else hostname
+            req_headers['Host'] = _host_header(hostname, port, parsed.scheme)
             conn.request('GET', _request_path(parsed), headers=req_headers)
             resp = conn.getresponse()
             if resp.status in _REDIRECT_STATUSES:
