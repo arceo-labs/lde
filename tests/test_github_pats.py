@@ -147,7 +147,6 @@ def test_masked_hides_every_token():
     assert out['github_pats'] == {'a': 'gith…'}
 
 
-
 def test_save_preserves_legacy_github_pat_on_disk(tmp_path):
     f = tmp_path / 's.json'
     f.write_text('{"github_pat": "legacy-token", "dtrack_url": "http://old"}')
