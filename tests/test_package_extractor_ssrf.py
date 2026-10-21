@@ -90,6 +90,13 @@ class _FakeResp:
         return self._body
 
 
+class _UndrainableResp(_FakeResp):
+    """A response whose body must never be read (simulates an unbounded body)."""
+
+    def read(self):
+        raise AssertionError('response body was read when it should have been skipped')
+
+
 class _FakeConn:
     instances = []
 
@@ -273,6 +280,51 @@ def test_redirect_to_blocked_ip_is_rejected_before_connect(monkeypatch):
     with pytest.raises(ValueError, match='blocked address'):
         package_extractor._fetch_url('http://advisory.example/cve')
     assert connects == [(public_ip, 80)]
+
+
+def test_redirect_body_is_not_read(monkeypatch):
+    # A caller-controlled redirect target could return a huge body; the
+    # connection is closed right after, so it must never be read into memory.
+    ip = '8.8.8.8'
+
+    def fake_gai(host, port, proto=0, **_kw):
+        return _addrinfo(ip, port)
+
+    def http_conn(*args, **kwargs):
+        conn = _FakeConn(*args, **kwargs)
+        conn._responses = [_UndrainableResp(
+            status=302,
+            headers={'Location': 'http://advisory.example/next'},
+        )]
+        return conn
+
+    monkeypatch.setattr(socket, 'getaddrinfo', fake_gai)
+    monkeypatch.setattr(socket, 'create_connection', lambda *a, **k: _FakeSock())
+    monkeypatch.setattr(package_extractor.http.client, 'HTTPConnection', http_conn)
+
+    with pytest.raises(ValueError, match='Too many redirects'):
+        package_extractor._fetch_url('http://advisory.example/start')
+
+
+def test_error_response_body_is_not_read(monkeypatch):
+    # Same concern for a non-redirect, non-2xx response (e.g. 500 with a
+    # caller-controlled, arbitrarily large body).
+    ip = '8.8.8.8'
+
+    def fake_gai(host, port, proto=0, **_kw):
+        return _addrinfo(ip, port)
+
+    def http_conn(*args, **kwargs):
+        conn = _FakeConn(*args, **kwargs)
+        conn._responses = [_UndrainableResp(status=500, reason='Internal Server Error')]
+        return conn
+
+    monkeypatch.setattr(socket, 'getaddrinfo', fake_gai)
+    monkeypatch.setattr(socket, 'create_connection', lambda *a, **k: _FakeSock())
+    monkeypatch.setattr(package_extractor.http.client, 'HTTPConnection', http_conn)
+
+    with pytest.raises(ValueError, match='Failed to fetch URL'):
+        package_extractor._fetch_url('http://advisory.example/cve')
 
 
 def test_too_many_redirects(monkeypatch):

@@ -175,14 +175,16 @@ def _http_get_pinned(url, headers, timeout=_FETCH_TIMEOUT_S):
             resp = conn.getresponse()
             if resp.status in _REDIRECT_STATUSES:
                 location = resp.getheader('Location')
-                resp.read()
+                # Connection is closed right below and never reused for
+                # another request, so there is no need to drain the body —
+                # skip it instead of risking an unbounded read() on a
+                # caller-controlled redirect target.
                 if not location:
                     raise ValueError(f'Redirect from {hostname} had no Location')
                 current = urljoin(current, location)
                 continue
             if resp.status >= 300:
                 reason = resp.reason or str(resp.status)
-                resp.read()
                 raise OSError(reason)
             body = resp.read()
             return body.decode(_response_charset(resp), errors='replace')
