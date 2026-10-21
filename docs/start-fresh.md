@@ -14,8 +14,8 @@ Local only. Do not run it against a production Dependency-Track.
 | Docker Desktop | 4.x+ | Started automatically on macOS if not running |
 | `docker compose` | v2 | Uses BuildKit, which reads `Dockerfile.dtrack.dockerignore` |
 | `lsof`, `ps` | system | Used to identify the process on the LDE port |
-| `~/.lde/dtrack-admin.txt` | — | Local Dependency-Track admin login: username on line 1, password on line 2. Written by `scripts/bootstrap_dtrack.py`. Not needed with `--keep-data` or `--keep-dtrack` |
-| `.settings.json` | — | Must already hold `dtrack_api_key` (see the README quick start) |
+| `~/.lde/dtrack-admin.txt` or `~/.lde/dtrack-admin.local.txt` | — | Local Dependency-Track admin login: username on line 1, password on line 2. Written by `scripts/bootstrap_dtrack.py`. Not needed with `--keep-data` or `--keep-dtrack`. A factory volume has no matching file yet; `start_fresh.py` prints the bootstrap command instead of treating that as a failed login. |
+| `.settings.json` | — | Created from `.settings.json.example` if missing. `dtrack_api_key` is copied from `~/.lde/dtrack-api-key.txt` when the settings key is empty (after `bootstrap_dtrack.py`, or by `start_fresh.py`). |
 
 ## Usage
 
@@ -38,13 +38,13 @@ python3 scripts/start_fresh.py [options]
 
 ### What it does
 
-1. **Preflight (read-only).** Checks Docker is available (or can be started on macOS), probes Dependency-Track with `GET /api/version` if it is already up, checks who owns the LDE port, and counts what it will clear. If the API is already up it logs in as admin and lists projects for the summary. It does not start Docker Desktop or run `docker compose up`.
+1. **Preflight (read-only).** Checks Docker is available (or can be started on macOS), probes Dependency-Track with `GET /api/version` if it is already up, checks who owns the LDE port, and counts what it will clear. If the API is already up it classifies admin state (factory vs matching password file vs mismatch), logs in only on a match, and lists projects for the summary. It does not start Docker Desktop or run `docker compose up`, and it never rotates the admin password.
 2. **Confirm.** Prints the summary and asks `Continue? [y/N]`. A declined prompt (or a missing `--yes` with no terminal) exits with nothing changed.
-3. **Start Dependency-Track.** Starts Docker Desktop if needed, then `docker compose up -d dtrack-apiserver dtrack-frontend`, and waits for `/api/version`. Logs in and lists projects here if the API was down during preflight.
+3. **Start Dependency-Track.** Starts Docker Desktop if needed, then `docker compose up -d dtrack-apiserver dtrack-frontend`, and waits for `/api/version`. Classifies admin state and lists projects here if the API was down during preflight. A factory instance stops here with the bootstrap command; nothing else is changed.
 4. **Stop LDE.** Sends SIGTERM to the process on the port, only if it is this repository's `server.py`.
 5. **Clear LDE data.** Permanently deletes `depexplorer.db`, `depexplorer.db-shm`, `depexplorer.db-wal` and `runs/` from `LDE_DATA_DIR` (or the repository root). It deletes only those names, never through a symlink. With `--backup`, it moves them to `~/.lde/backups/lde-local-<UTC timestamp>/` (mode `0700`) instead.
 6. **Delete Dependency-Track projects.** Deletes every project, then re-lists and fails if any remain.
-7. **Start LDE.** Runs `python3 server.py --port <n>` in the foreground, then checks `/api/runs`, `/api/dtrack-status` and `/api/gh-status`. Press Ctrl-C to stop the server.
+7. **Start LDE.** If `.settings.json` has an empty `dtrack_api_key` and `~/.lde/dtrack-api-key.txt` exists, copies the key in (does not overwrite a non-empty settings key). Runs `python3 server.py --port <n>` in the foreground, then checks `/api/runs`, `/api/dtrack-status` and `/api/gh-status`. Press Ctrl-C to stop the server.
 
 Any failure in steps 1–2 exits with nothing changed. After you confirm, a later failure (login after a first-time compose start, a delete error) can leave Dependency-Track running.
 
@@ -103,13 +103,24 @@ Deleted Dependency-Track projects cannot be restored this way. Re-ingest from LD
 start_fresh: port 8002 is held by PID 4242 (python3 -m http.server 8002), which is not this repo's server.py. Stop it yourself or pass --port.
 ```
 
-**Admin login fails.** The script stops before changing anything:
+**Factory / never bootstrapped.** `admin`/`admin` still returns `FORCE_PASSWORD_CHANGE`. The script stops before changing anything and prints the bootstrap command. It does not rotate the admin password and does not overwrite `~/.lde/dtrack-admin.txt`:
 
 ```
-start_fresh: Dependency-Track admin login failed (HTTP 401: INVALID_CREDENTIALS). Nothing was changed. See docs/start-fresh.md#recover-the-dependency-track-admin-password
+start_fresh: Dependency-Track is factory / never bootstrapped (admin/admin still requires FORCE_PASSWORD_CHANGE). Nothing was changed. This script does not rotate the admin password. Run:
+  DTRACK_ADMIN_PASSWORD=admin python3 scripts/bootstrap_dtrack.py --password-out ~/.lde/dtrack-admin.local.txt --no-aws
+Then re-run:
+  python3 scripts/start_fresh.py --yes --dtrack-password-file ~/.lde/dtrack-admin.local.txt
 ```
 
-Run `python3 scripts/start_fresh.py --keep-dtrack` to clear LDE only, or recover the password (below).
+If `~/.lde/dtrack-admin.txt` exists, copy it first (`cp -np ~/.lde/dtrack-admin.txt ~/.lde/dtrack-admin.other.txt`); it may belong to another instance. `bootstrap_dtrack.py` writes the API key to `~/.lde/dtrack-api-key.txt` and into `.settings.json` as `dtrack_api_key`.
+
+**Admin login does not match a bootstrapped instance.** The password file is wrong, and factory `admin`/`admin` no longer works. The script stops before changing anything:
+
+```
+start_fresh: Dependency-Track admin login failed (HTTP 401: INVALID_CREDENTIALS). The password file does not match this instance (already bootstrapped, not factory). Nothing was changed. See docs/start-fresh.md#recover-the-dependency-track-admin-password
+```
+
+Run `python3 scripts/start_fresh.py --keep-dtrack` to clear LDE only, or recover the password (below). This is not "password was already changed" — that message is gone; a stale password against a factory volume is the factory case above.
 
 **GitHub token rejected.** Reported as a warning; the script still succeeds:
 
@@ -128,9 +139,11 @@ A common cause: `scripts/bootstrap_dtrack.py` writes `~/.lde/dtrack-admin.txt` b
 Check the audit log first. It records every login and password change:
 
 ```bash
-docker exec library-dependency-explorer-dtrack-apiserver-1 \
+docker compose exec dtrack-apiserver \
   cat /data/.dependency-track/dependency-track-audit.log
 ```
+
+The Compose project name is the checkout directory (`lde` for a clone in `lde/`). `scripts/reset_dtrack_admin.py` uses `<project>-dtrack-apiserver-1` and `<project>_dtrack_data`. In the volume-backup commands below, set `PROJECT=$(basename "$PWD")` if this checkout is not named `lde`.
 
 `scripts/reset_dtrack_admin.py` runs steps 1–6 below. It previews the plan and asks for confirmation before it changes anything. On a failed login it leaves the password file alone and prints the restore command. Run it yourself, because it changes a credential:
 
@@ -154,7 +167,7 @@ The reset replaces the admin row's hash in the embedded H2 database. Dependency-
     docker compose stop dtrack-apiserver
     mkdir -p -m 700 ~/.lde/backups
     docker run --rm --entrypoint tar \
-      -v library-dependency-explorer_dtrack_data:/data:ro -v ~/.lde/backups:/backup \
+      -v lde_dtrack_data:/data:ro -v ~/.lde/backups:/backup \
       library-dependency-explorer/dtrack-apiserver:local \
       cf /backup/dtrack_data-$(date +%F).tar -C /data .
     chmod 600 ~/.lde/backups/dtrack_data-*.tar
@@ -164,7 +177,7 @@ The reset replaces the admin row's hash in the embedded H2 database. Dependency-
 
     ```bash
     W=$(mktemp -d)
-    docker cp library-dependency-explorer-dtrack-apiserver-1:/opt/owasp/dependency-track/dependency-track-apiserver.jar "$W/"
+    docker compose cp dtrack-apiserver:/opt/owasp/dependency-track/dependency-track-apiserver.jar "$W/"
     unzip -oqj "$W/dependency-track-apiserver.jar" 'WEB-INF/lib/h2-*.jar' -d "$W/lib"
     ```
 
@@ -182,7 +195,7 @@ The reset replaces the admin row's hash in the embedded H2 database. Dependency-
 
     ```bash
     docker run --rm --entrypoint java \
-      -v library-dependency-explorer_dtrack_data:/data -v "$W/lib":/h2:ro -v "$W/reset.sql":/reset.sql:ro \
+      -v lde_dtrack_data:/data -v "$W/lib":/h2:ro -v "$W/reset.sql":/reset.sql:ro \
       library-dependency-explorer/dtrack-apiserver:local \
       -cp "/h2/$(ls "$W/lib")" org.h2.tools.RunScript \
       -url 'jdbc:h2:/data/.dependency-track/db' -user sa -password '' -script /reset.sql
@@ -213,7 +226,7 @@ The script makes one GitHub API call per run, through LDE's `/api/gh-status` che
 
 - The admin password is read only from `--dtrack-password-file`. It is never printed, logged or passed on a command line.
 - The admin session token is held in memory only and never printed. Error output shows Dependency-Track reason codes (`INVALID_CREDENTIALS`), never response bodies from a successful login.
-- `dtrack_api_key` is not read by this script. LDE reads it from `.settings.json`.
+- `dtrack_api_key` is copied from `~/.lde/dtrack-api-key.txt` into `.settings.json` only when the settings key is empty. A non-empty settings key is left alone. The key is never printed.
 - Backups are opt-in (`--backup`) and go to `~/.lde/backups/` with directory mode `0700`. They hold your run history; delete them when no longer needed.
 - The script stops a process only after confirming it is this repository's `server.py`.
 - Destructive steps run only after preflight passes and you confirm, or pass `--yes`. Starting Docker Desktop and `docker compose up` wait for that confirmation too.

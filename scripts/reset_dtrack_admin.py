@@ -36,9 +36,18 @@ SERVE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DTRACK_URL = 'http://127.0.0.1:8081'
 DEFAULT_PASSWORD_FILE = os.path.expanduser('~/.lde/dtrack-admin.txt')
 DEFAULT_BACKUP_ROOT = os.path.expanduser('~/.lde/backups')
-CONTAINER = 'library-dependency-explorer-dtrack-apiserver-1'
 IMAGE = 'library-dependency-explorer/dtrack-apiserver:local'
-VOLUME = 'library-dependency-explorer_dtrack_data'
+
+
+def compose_project(serve_dir=SERVE_DIR):
+    """Compose project name is the checkout directory (e.g. lde, not a hardcoded folder)."""
+    name = os.path.basename(os.path.realpath(serve_dir)).lower()
+    name = re.sub(r'[^a-z0-9_-]', '', name)
+    return name or 'lde'
+
+
+CONTAINER = f'{compose_project()}-dtrack-apiserver-1'
+VOLUME = f'{compose_project()}_dtrack_data'
 SERVICE = 'dtrack-apiserver'
 APISERVER_JAR = '/opt/owasp/dependency-track/dependency-track-apiserver.jar'
 H2_JAR_RE = re.compile(r'^WEB-INF/lib/(h2-[0-9.]+\.jar)$')

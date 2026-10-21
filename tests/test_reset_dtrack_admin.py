@@ -29,6 +29,22 @@ GOOD_2Y = "$2y$14$" + "a" * 53
 GOOD_2A = "$2a$14$" + "a" * 53
 
 
+class TestComposeNames(unittest.TestCase):
+    def test_project_is_checkout_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            checkout = os.path.join(d, "lde")
+            os.mkdir(checkout)
+            self.assertEqual(rd.compose_project(checkout), "lde")
+            self.assertEqual(
+                f'{rd.compose_project(checkout)}-dtrack-apiserver-1',
+                "lde-dtrack-apiserver-1",
+            )
+            self.assertEqual(
+                f'{rd.compose_project(checkout)}_dtrack_data',
+                "lde_dtrack_data",
+            )
+
+
 class TestLocalUrl(unittest.TestCase):
     def test_accepts_local(self):
         for url in ("http://127.0.0.1:8081", "http://localhost:8081", "http://[::1]:8081"):

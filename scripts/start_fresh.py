@@ -54,6 +54,8 @@ def _load_bootstrap():
 
 
 _bootstrap = _load_bootstrap()
+SETTINGS_PATH = _bootstrap.DEFAULT_SETTINGS
+API_KEY_PATH = _bootstrap.DEFAULT_KEY_OUT
 
 
 def log(msg):
@@ -138,6 +140,66 @@ def read_password_file(path):
     if len(lines) < 2 or not lines[0].strip() or not lines[1]:
         raise ValueError(f'{path}: need username on line 1 and password on line 2')
     return lines[0].strip(), lines[1]
+
+
+def factory_state_error(password_file=None):
+    cmd = _bootstrap.factory_bootstrap_command()
+    extra = _bootstrap.other_instance_warning(password_file or DEFAULT_PASSWORD_FILE)
+    lines = [
+        'Dependency-Track is factory / never bootstrapped '
+        f'(admin/admin still requires {_bootstrap.FORCE_PASSWORD_CHANGE}). '
+        'Nothing was changed. This script does not rotate the admin password. Run:',
+        f'  {cmd}',
+        'Then re-run:',
+        '  python3 scripts/start_fresh.py --yes '
+        f'--dtrack-password-file {_bootstrap.LOCAL_PASSWORD_OUT}',
+    ]
+    if extra:
+        lines.append(extra)
+    raise RuntimeError('\n'.join(lines))
+
+
+def mismatch_login_error(status, body, password_file):
+    reason = (body or '').strip()[:80] or f'HTTP {status}'
+    extra = _bootstrap.other_instance_warning(password_file)
+    lines = [
+        f'Dependency-Track admin login failed (HTTP {status}: {reason}). '
+        'The password file does not match this instance (already bootstrapped, not factory). '
+        f'Nothing was changed. See {RECOVERY_DOC}',
+        'Or pass --keep-dtrack to clear LDE only.',
+    ]
+    if extra:
+        lines.append(extra)
+    raise RuntimeError('\n'.join(lines))
+
+
+def missing_password_file_error(path):
+    cmd = _bootstrap.factory_bootstrap_command()
+    extra = _bootstrap.other_instance_warning(DEFAULT_PASSWORD_FILE)
+    lines = [
+        f'No password file at {path}. If Dependency-Track is factory / never bootstrapped, run:',
+        f'  {cmd}',
+        'Then re-run with --dtrack-password-file pointing at that local file. '
+        'If the instance is already bootstrapped, pass the matching password file.',
+    ]
+    if extra:
+        lines.append(extra)
+    raise RuntimeError('\n'.join(lines))
+
+
+def dtrack_admin_state(url, username=None, password=None):
+    """Return (state, status, body) from bootstrap.classify_login."""
+    return _bootstrap.classify_login(url, username, password)
+
+
+def require_matching_admin(url, username, password, password_file):
+    """Return a session token, or raise factory/mismatch without rotating anything."""
+    state, status, body = dtrack_admin_state(url, username, password)
+    if state == 'factory':
+        factory_state_error(password_file)
+    if state == 'match':
+        return body.strip()
+    mismatch_login_error(status, body, password_file)
 
 
 def dtrack_login(url, username, password):
@@ -392,9 +454,18 @@ def main(argv=None):
     dt_up = dtrack_ready(args.dtrack_url)
     username = password = token = projects = None
     if clear_dtrack:
-        username, password = read_password_file(args.dtrack_password_file)
+        if os.path.isfile(args.dtrack_password_file):
+            username, password = read_password_file(args.dtrack_password_file)
+        elif dt_up:
+            state_name, _, _ = dtrack_admin_state(args.dtrack_url)
+            if state_name == 'factory':
+                factory_state_error(args.dtrack_password_file)
+            missing_password_file_error(args.dtrack_password_file)
+        else:
+            missing_password_file_error(args.dtrack_password_file)
         if dt_up:
-            token = dtrack_login(args.dtrack_url, username, password)
+            token = require_matching_admin(
+                args.dtrack_url, username, password, args.dtrack_password_file)
             projects = list_projects(args.dtrack_url, token)
     state = lde_state(data_dir) if clear_lde else None
 
@@ -404,6 +475,12 @@ def main(argv=None):
         summary.append('start Docker Desktop')
     if not dt_up:
         summary.append('start Dependency-Track (docker compose up -d)')
+        if clear_dtrack:
+            summary.append(
+                'classify Dependency-Track admin state after the API is up '
+                '(factory / never bootstrapped instances need bootstrap; '
+                'this script does not rotate the admin password)'
+            )
     if listeners:
         summary.append(f'stop LDE on port {args.port} (PID {", ".join(str(p) for p, _, _ in listeners)})')
     if clear_lde:
@@ -431,7 +508,8 @@ def main(argv=None):
     ensure_docker()
     ensure_dtrack(args.dtrack_url)
     if clear_dtrack and token is None:
-        token = dtrack_login(args.dtrack_url, username, password)
+        token = require_matching_admin(
+            args.dtrack_url, username, password, args.dtrack_password_file)
         projects = list_projects(args.dtrack_url, token)
     if listeners:
         stop_lde(listeners, args.port)
@@ -448,6 +526,9 @@ def main(argv=None):
         delete_projects(args.dtrack_url, token, projects)
 
     # 6. Start and check
+    if _bootstrap.ensure_settings_api_key(
+            SETTINGS_PATH, API_KEY_PATH, example_path=_bootstrap.EXAMPLE_SETTINGS):
+        log(f'wired dtrack_api_key from {API_KEY_PATH} into {SETTINGS_PATH}')
     proc = start_lde(args.port)
     failures = check_lde(args.port, expect_empty=clear_lde)
     if failures:

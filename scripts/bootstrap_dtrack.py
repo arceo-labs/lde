@@ -10,11 +10,15 @@ Ingest needs that permission; package search uses VIEW_PORTFOLIO.
 Never print the password or the API key. Print only the key's public prefix
 (first 8 characters), the key length, the team name, permission names, and
 the password / key file paths. The API key is written to --key-out (mode 0600)
-when not stored in Secrets Manager.
+when not stored in Secrets Manager, and copied into --settings-out
+(``.settings.json`` ``dtrack_api_key``) so LDE ingest does not need a
+manual paste.
 
 --password-out defaults to ~/.lde/dtrack-admin.txt, the local instance's
 login. When bootstrapping any other instance (for example AWS), pass a
 different --password-out, or the local password is overwritten and lost.
+A blank local volume should use --password-out ~/.lde/dtrack-admin.local.txt
+so a file that may belong to AWS is not overwritten.
 
 Bootstrap also applies COST_SETTINGS. Dependency-Track keeps these in its
 database and ignores environment variables for them. --settings-only
@@ -35,10 +39,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_URL = 'http://127.0.0.1:8081'
 DEFAULT_PASSWORD_OUT = os.path.expanduser('~/.lde/dtrack-admin.txt')
+LOCAL_PASSWORD_OUT = os.path.expanduser('~/.lde/dtrack-admin.local.txt')
 DEFAULT_KEY_OUT = os.path.expanduser('~/.lde/dtrack-api-key.txt')
+DEFAULT_SETTINGS = os.path.join(_REPO, '.settings.json')
+EXAMPLE_SETTINGS = os.path.join(_REPO, '.settings.json.example')
 USERNAME = 'admin'
+FACTORY_PASSWORD = 'admin'
+FORCE_PASSWORD_CHANGE = 'FORCE_PASSWORD_CHANGE'
 PERMISSION = 'PROJECT_CREATION_UPLOAD'
 TEAM_NAME = 'Automation'
 
@@ -78,6 +88,99 @@ def write_password_file(path, username, password):
 
 def write_key_file(path, api_key):
     _write_0600(path, f'{api_key}\n')
+
+
+def factory_bootstrap_command(password_out=None):
+    """Exact local bootstrap command. Uses .local.txt so AWS/other logins survive."""
+    dest = password_out or LOCAL_PASSWORD_OUT
+    return (
+        f'DTRACK_ADMIN_PASSWORD=admin python3 scripts/bootstrap_dtrack.py '
+        f'--password-out {dest} --no-aws'
+    )
+
+
+def other_instance_warning(_path=None):
+    """Warn when ~/.lde/dtrack-admin.txt exists and may belong to another instance."""
+    default = DEFAULT_PASSWORD_OUT
+    if not os.path.isfile(default):
+        return ''
+    other = os.path.expanduser('~/.lde/dtrack-admin.other.txt')
+    return (
+        f'{default} may belong to another instance (for example AWS). '
+        f'Keep a copy first: cp -np {default} {other}'
+    )
+
+
+def is_force_password_change(status, body):
+    return status == 401 and (body or '').strip() == FORCE_PASSWORD_CHANGE
+
+
+def classify_login(url, username=None, password=None):
+    """Classify admin login without rotating anything.
+
+    Returns (state, status, body) where state is:
+      factory  — admin/admin still yields FORCE_PASSWORD_CHANGE (or a 200 on
+                 an unrotated factory password)
+      match    — *username*/*password* returned HTTP 200 (body is the token)
+      mismatch — credentials failed and the instance is not factory
+    """
+    status = None
+    body = ''
+    if username and password is not None:
+        status, body = login(url, username, password)
+        if status == 200:
+            return 'match', status, body
+        if is_force_password_change(status, body):
+            return 'factory', status, body
+    fact_status, fact_body = login(url, USERNAME, FACTORY_PASSWORD)
+    if is_force_password_change(fact_status, fact_body) or fact_status == 200:
+        return 'factory', fact_status, fact_body
+    if status is None:
+        return 'mismatch', fact_status, fact_body
+    return 'mismatch', status, body
+
+
+def reconcile_dtrack_api_key(settings_path, api_key, example_path=None):
+    """Write *api_key* into settings ``dtrack_api_key``. Never prints the key.
+
+    Creates the file from *example_path* when settings are missing. Returns
+    True when the file was written, False when the key was already present.
+    """
+    if not api_key:
+        raise ValueError('empty API key')
+    data = {}
+    if settings_path and os.path.isfile(settings_path):
+        with open(settings_path) as fh:
+            loaded = json.load(fh)
+        if not isinstance(loaded, dict):
+            raise RuntimeError(f'{settings_path}: expected a JSON object')
+        data = loaded
+        if (data.get('dtrack_api_key') or '') == api_key:
+            return False
+    elif example_path and os.path.isfile(example_path):
+        with open(example_path) as fh:
+            loaded = json.load(fh)
+        if isinstance(loaded, dict):
+            data = loaded
+    data['dtrack_api_key'] = api_key
+    _write_0600(settings_path, json.dumps(data, indent=2) + '\n')
+    return True
+
+
+def ensure_settings_api_key(settings_path, key_path, example_path=None):
+    """Copy *key_path* into settings when ``dtrack_api_key`` is empty."""
+    if not key_path or not os.path.isfile(key_path):
+        return False
+    with open(key_path) as fh:
+        api_key = fh.read().strip()
+    if not api_key:
+        return False
+    if settings_path and os.path.isfile(settings_path):
+        with open(settings_path) as fh:
+            loaded = json.load(fh)
+        if isinstance(loaded, dict) and (loaded.get('dtrack_api_key') or '').strip():
+            return False
+    return reconcile_dtrack_api_key(settings_path, api_key, example_path=example_path)
 
 
 def generate_password(length=32):
@@ -190,7 +293,7 @@ def apply_settings(url, token, settings=COST_SETTINGS):
 
 def apply_settings_only(url, username, password):
     status, body = login(url, username, password)
-    if status == 401 and body.strip() == 'FORCE_PASSWORD_CHANGE':
+    if is_force_password_change(status, body):
         raise RuntimeError(
             'instance still has the default admin password; run the full bootstrap first'
         )
@@ -255,10 +358,10 @@ def key_public_prefix(api_key_obj, key_value):
 
 
 def bootstrap(url, username, current_password, password_out, secret_id=None,
-              region='us-east-1', no_aws=False, key_out=None):
+              region='us-east-1', no_aws=False, key_out=None, settings_path=None):
     status, body = login(url, username, current_password)
     password_for_file = current_password
-    if status == 401 and body.strip() == 'FORCE_PASSWORD_CHANGE':
+    if is_force_password_change(status, body):
         new_password = generate_password()
         # Persist first so a lost response cannot leave an unknown admin password.
         write_password_file(password_out, username, new_password)
@@ -285,9 +388,21 @@ def bootstrap(url, username, current_password, password_out, secret_id=None,
             )
         token = body.strip()
     elif status == 401:
+        reason = body.strip() or 'UNAUTHORIZED'
+        fact_status, fact_body = login(url, USERNAME, FACTORY_PASSWORD)
+        if is_force_password_change(fact_status, fact_body) or fact_status == 200:
+            extra = other_instance_warning(password_out)
+            raise RuntimeError(
+                f'wrong password; this instance still looks factory '
+                f'(admin/admin returns {FORCE_PASSWORD_CHANGE}). Not rotating it. '
+                f'Retry with DTRACK_ADMIN_PASSWORD=admin and a local --password-out:\n'
+                f'  {factory_bootstrap_command()}'
+                + (f'\n{extra}' if extra else '')
+            )
         raise RuntimeError(
-            f'login rejected (HTTP 401): {body.strip() or "UNAUTHORIZED"}. '
-            'Password was already changed; not rotating it.'
+            f'login rejected (HTTP 401): {reason}. '
+            'This instance is already bootstrapped; the password does not match. '
+            'Not rotating it.'
         )
     elif status != 200:
         raise RuntimeError(f'login failed: HTTP {status}: {body.strip()}')
@@ -317,6 +432,9 @@ def bootstrap(url, username, current_password, password_out, secret_id=None,
                 'or --key-out for a mode-0600 local file (default ~/.lde/dtrack-api-key.txt).'
             )
         write_key_file(key_out, key_value)
+        dest = settings_path or DEFAULT_SETTINGS
+        if reconcile_dtrack_api_key(dest, key_value, example_path=EXAMPLE_SETTINGS):
+            print(f'settings: dtrack_api_key wired into {dest}')
 
     try:
         apply_settings(url, token)
@@ -350,6 +468,11 @@ def main(argv=None):
         help='Mode-0600 file for the API key when not using --secret-id '
              '(default: ~/.lde/dtrack-api-key.txt). Never printed.',
     )
+    parser.add_argument(
+        '--settings-out', default=DEFAULT_SETTINGS,
+        help='Local .settings.json to receive dtrack_api_key when not using '
+             '--secret-id (default: the repo .settings.json). Never printed.',
+    )
     parser.add_argument('--secret-id', default='')
     parser.add_argument('--region', default=os.environ.get('AWS_REGION', 'us-east-1'))
     parser.add_argument('--no-aws', action='store_true')
@@ -374,6 +497,7 @@ def main(argv=None):
         region=args.region,
         no_aws=args.no_aws,
         key_out=args.key_out or None,
+        settings_path=args.settings_out or None,
     )
 
 

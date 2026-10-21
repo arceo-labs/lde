@@ -6,7 +6,7 @@ On an AWS deploy, run `python3 scripts/set_lde_password.py` before `terraform pl
 
 The browser username is the JSON key. The browser password is the plaintext, also stored in `~/.lde/lde-admin.txt`.
 
-Dependency-Track is a second login. Set it with `scripts/bootstrap_dtrack.py` on a fresh instance, which saves the admin login to a 0600 file. Locally that file is `~/.lde/dtrack-admin.txt`; for any other instance pass `--password-out ~/.lde/dtrack-admin.aws.txt` (or similar) so the local login survives. A password set by hand in the browser is saved nowhere. To recover a lost local password, the user runs `scripts/reset_dtrack_admin.py`.
+Dependency-Track is a second login. Set it with `scripts/bootstrap_dtrack.py` on a fresh instance, which saves the admin login to a 0600 file. A blank local volume should use `--password-out ~/.lde/dtrack-admin.local.txt` so `~/.lde/dtrack-admin.txt` is not overwritten if it holds another instance. For AWS pass `--password-out ~/.lde/dtrack-admin.aws.txt`. Local bootstrap also copies the API key into `.settings.json`. A password set by hand in the browser is saved nowhere. To recover a lost local password, the user runs `scripts/reset_dtrack_admin.py`. `start_fresh.py` reports factory vs mismatched vs matching admin state; it does not rotate the password.
 
 Run `python3 scripts/check_aws.py preflight` before any AWS `terraform plan` and `python3 scripts/check_aws.py verify` after any apply or secret change. Claude's `start-fresh-aws` skill covers the judgement calls.
 

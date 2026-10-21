@@ -196,6 +196,7 @@ class BootstrapDtrackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pw_out = os.path.join(tmp, "dtrack-admin.txt")
             key_out = os.path.join(tmp, "dtrack-api-key.txt")
+            settings_out = os.path.join(tmp, ".settings.json")
             self._state["password_out_path"] = pw_out
             os.environ["DTRACK_ADMIN_PASSWORD"] = "admin"
             try:
@@ -203,6 +204,7 @@ class BootstrapDtrackTests(unittest.TestCase):
                     "--url", self.url,
                     "--password-out", pw_out,
                     "--key-out", key_out,
+                    "--settings-out", settings_out,
                     "--no-aws",
                 ])
             finally:
@@ -234,6 +236,7 @@ class BootstrapDtrackTests(unittest.TestCase):
             # Local / --no-aws path must persist the API key (never print it).
             self.assertEqual(stat.S_IMODE(os.stat(key_out).st_mode), 0o600)
             self.assertEqual(open(key_out).read().strip(), API_KEY)
+            self.assertEqual(json.load(open(settings_out))["dtrack_api_key"], API_KEY)
             self._assert_cost_settings_posted()
 
     def _assert_cost_settings_posted(self):
@@ -316,6 +319,73 @@ class BootstrapDtrackTests(unittest.TestCase):
             arg.startswith("file://") for arg in cmd
         ))
         self.assertFalse(os.path.exists(captured["path"]))
+
+    def test_stale_password_against_factory_does_not_say_already_changed(self):
+        mod = _load()
+        os.environ["DTRACK_ADMIN_PASSWORD"] = "stale-from-1password"
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                mod.main(["--url", self.url, "--no-aws"])
+        finally:
+            os.environ.pop("DTRACK_ADMIN_PASSWORD", None)
+        msg = str(ctx.exception)
+        self.assertIn("wrong password", msg)
+        self.assertIn("factory", msg)
+        self.assertNotIn("already changed", msg.lower())
+        self.assertIn("DTRACK_ADMIN_PASSWORD=admin", msg)
+        self.assertNotIn("force_change", self._state)
+        self.assertFalse(self._state["key_created"])
+
+    def test_wrong_password_against_bootstrapped_is_mismatch(self):
+        mod = _load()
+        self._state["password_changed"] = True
+        self._state["new_password"] = "already-rotated"
+        os.environ["DTRACK_ADMIN_PASSWORD"] = "stale-from-1password"
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                mod.main(["--url", self.url, "--no-aws"])
+        finally:
+            os.environ.pop("DTRACK_ADMIN_PASSWORD", None)
+        msg = str(ctx.exception)
+        self.assertIn("already bootstrapped", msg)
+        self.assertNotIn("already changed", msg.lower())
+        self.assertNotIn("still looks factory", msg)
+        self.assertFalse(self._state["key_created"])
+
+    def test_classify_login_factory_match_mismatch(self):
+        mod = _load()
+        state, status, body = mod.classify_login(self.url, "admin", "wrong")
+        self.assertEqual(state, "factory")
+        self.assertEqual(status, 401)
+        self.assertIn("FORCE_PASSWORD_CHANGE", body)
+
+        state, status, body = mod.classify_login(self.url, "admin", "admin")
+        self.assertEqual(state, "factory")
+
+        self._state["password_changed"] = True
+        self._state["new_password"] = "already-rotated"
+        state, status, body = mod.classify_login(self.url, "admin", "already-rotated")
+        self.assertEqual(state, "match")
+        self.assertEqual(status, 200)
+
+        state, status, body = mod.classify_login(self.url, "admin", "wrong")
+        self.assertEqual(state, "mismatch")
+        self.assertEqual(status, 401)
+
+    def test_reconcile_api_key_is_idempotent(self):
+        mod = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = os.path.join(tmp, ".settings.json")
+            self.assertTrue(mod.reconcile_dtrack_api_key(settings, API_KEY))
+            self.assertEqual(json.load(open(settings))["dtrack_api_key"], API_KEY)
+            self.assertFalse(mod.reconcile_dtrack_api_key(settings, API_KEY))
+            other_key = os.path.join(tmp, "key.txt")
+            open(other_key, "w").write(API_KEY + "\n")
+            self.assertFalse(mod.ensure_settings_api_key(settings, other_key))
+            empty = os.path.join(tmp, "empty.json")
+            open(empty, "w").write('{"dtrack_api_key": ""}\n')
+            self.assertTrue(mod.ensure_settings_api_key(empty, other_key))
+            self.assertEqual(json.load(open(empty))["dtrack_api_key"], API_KEY)
 
 
 if __name__ == "__main__":

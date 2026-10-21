@@ -56,10 +56,14 @@ class _FakeDtrack(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         form = dict(urllib.parse.parse_qsl(self.rfile.read(length).decode()))
         if self.path == "/api/v1/user/login":
-            if form.get("password") == st["password"]:
+            password = form.get("password")
+            if st.get("factory") and password == "admin":
+                self._send(401, b"FORCE_PASSWORD_CHANGE")
+                return
+            if not st.get("factory") and password == st["password"]:
                 self._send(200, TOKEN.encode())
-            else:
-                self._send(401, b"INVALID_CREDENTIALS")
+                return
+            self._send(401, b"INVALID_CREDENTIALS")
             return
         self._send(404)
 
@@ -109,7 +113,9 @@ class _Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        _FakeDtrack.state = {"password": PASSWORD, "projects": {}, "deletes": []}
+        _FakeDtrack.state = {
+            "password": PASSWORD, "projects": {}, "deletes": [], "factory": False,
+        }
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeDtrack)
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -151,6 +157,10 @@ class _Base(unittest.TestCase):
             self.start = stack.enter_context(mock.patch.object(sf, "start_lde", return_value=proc))
             stack.enter_context(mock.patch.object(sf, "check_lde", return_value=[]))
             stack.enter_context(mock.patch.object(sf.lde_db, "DATA_DIR", self.data_dir))
+            stack.enter_context(mock.patch.object(
+                sf, "SETTINGS_PATH", os.path.join(self.tmp.name, ".settings.json")))
+            stack.enter_context(mock.patch.object(
+                sf, "API_KEY_PATH", os.path.join(self.tmp.name, "dtrack-api-key.txt")))
             if confirm is not None:
                 stack.enter_context(mock.patch.object(sf, "confirm", return_value=confirm))
             stack.enter_context(contextlib.redirect_stdout(out))
@@ -281,12 +291,15 @@ class TestDeleteLdeState(unittest.TestCase):
 
 
 class TestLoginFailure(_Base):
-    def test_aborts_before_changing_anything(self):
+    def test_mismatch_aborts_before_changing_anything(self):
         _FakeDtrack.state["projects"] = {"u1": _project("u1", "org/a")}
         _FakeDtrack.state["password"] = "something-else"
         code, out = self._run_main()
         self.assertEqual(code, 1)
         self.assertIn("INVALID_CREDENTIALS", out)
+        self.assertIn("already bootstrapped, not factory", out)
+        self.assertNotIn("already changed", out.lower())
+        self.assertNotIn("never bootstrapped", out)
         self.assertIn("Nothing was changed", out)
         self.assertEqual(_FakeDtrack.state["deletes"], [])
         self.assertTrue(os.path.exists(os.path.join(self.data_dir, "depexplorer.db")))
@@ -294,6 +307,83 @@ class TestLoginFailure(_Base):
         self.start.assert_not_called()
         self.ensure_dtrack.assert_not_called()
         self.assertNotIn(PASSWORD, out)
+
+    def test_factory_with_stale_password_file(self):
+        _FakeDtrack.state["factory"] = True
+        _FakeDtrack.state["projects"] = {"u1": _project("u1", "org/a")}
+        code, out = self._run_main()
+        self.assertEqual(code, 1, out)
+        self.assertIn("factory / never bootstrapped", out)
+        self.assertIn("FORCE_PASSWORD_CHANGE", out)
+        self.assertIn("bootstrap_dtrack.py", out)
+        self.assertIn("--password-out", out)
+        self.assertIn("dtrack-admin.local.txt", out)
+        self.assertNotIn("admin login failed", out)
+        self.assertNotIn("already changed", out.lower())
+        self.assertEqual(_FakeDtrack.state["deletes"], [])
+        self.assertTrue(os.path.exists(os.path.join(self.data_dir, "depexplorer.db")))
+        self.start.assert_not_called()
+        self.ensure_dtrack.assert_not_called()
+        self.assertNotIn(PASSWORD, out)
+
+    def test_missing_password_file_when_api_down(self):
+        os.remove(self.pw_file)
+        with mock.patch.object(sf, "dtrack_ready", return_value=False):
+            code, out = self._run_main()
+        self.assertEqual(code, 1, out)
+        self.assertIn("factory / never bootstrapped", out)
+        self.assertIn("bootstrap_dtrack.py", out)
+        self.assertIn("dtrack-admin.local.txt", out)
+        self.start.assert_not_called()
+        self.ensure_dtrack.assert_not_called()
+
+    def test_factory_without_password_file(self):
+        _FakeDtrack.state["factory"] = True
+        os.remove(self.pw_file)
+        code, out = self._run_main()
+        self.assertEqual(code, 1, out)
+        self.assertIn("factory / never bootstrapped", out)
+        self.assertIn("DTRACK_ADMIN_PASSWORD=admin", out)
+        self.assertIn("--no-aws", out)
+        self.start.assert_not_called()
+        self.ensure_dtrack.assert_not_called()
+
+    def test_matching_password_still_clears(self):
+        _FakeDtrack.state["projects"] = {"u1": _project("u1", "org/a")}
+        code, out = self._run_main()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(_FakeDtrack.state["projects"], {})
+        self.start.assert_called_once()
+
+    def test_wires_api_key_when_settings_key_empty(self):
+        settings = os.path.join(self.tmp.name, ".settings.json")
+        key_path = os.path.join(self.tmp.name, "dtrack-api-key.txt")
+        with open(settings, "w") as fh:
+            json.dump({"dtrack_url": "http://127.0.0.1:8081", "dtrack_api_key": ""}, fh)
+        with open(key_path, "w") as fh:
+            fh.write("odt_fromFileNotPrinted\n")
+        with mock.patch.object(sf, "SETTINGS_PATH", settings), \
+             mock.patch.object(sf, "API_KEY_PATH", key_path):
+            code, out = self._run_main()
+        self.assertEqual(code, 0, out)
+        wired = json.load(open(settings))
+        self.assertEqual(wired["dtrack_api_key"], "odt_fromFileNotPrinted")
+        self.assertIn("wired dtrack_api_key", out)
+        self.assertNotIn("odt_fromFileNotPrinted", out)
+
+    def test_does_not_overwrite_existing_settings_key(self):
+        settings = os.path.join(self.tmp.name, ".settings.json")
+        key_path = os.path.join(self.tmp.name, "dtrack-api-key.txt")
+        with open(settings, "w") as fh:
+            json.dump({"dtrack_api_key": "odt_alreadyInSettings"}, fh)
+        with open(key_path, "w") as fh:
+            fh.write("odt_fromFile\n")
+        with mock.patch.object(sf, "SETTINGS_PATH", settings), \
+             mock.patch.object(sf, "API_KEY_PATH", key_path):
+            code, out = self._run_main()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.load(open(settings))["dtrack_api_key"], "odt_alreadyInSettings")
+        self.assertNotIn("wired dtrack_api_key", out)
 
 
 class TestDtrackProjects(_Base):

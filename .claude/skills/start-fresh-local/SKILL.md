@@ -30,13 +30,15 @@ description: Start, restart or reset the local LDE stack (server.py + Dependency
 
 ## When the preview stops
 
-**`admin login failed`.** The password in `~/.lde/dtrack-admin.txt` no longer matches the local instance. Nothing has changed yet.
-1. Read the audit log: `docker exec library-dependency-explorer-dtrack-apiserver-1 cat /data/.dependency-track/dependency-track-audit.log`. It records every login and password change.
+**`factory / never bootstrapped`.** `admin`/`admin` still requires `FORCE_PASSWORD_CHANGE`. Nothing has changed. Show the user the printed `bootstrap_dtrack.py` command (it uses `--password-out ~/.lde/dtrack-admin.local.txt` so `~/.lde/dtrack-admin.txt` is not overwritten). They run it. Then rerun `start_fresh.py --yes --dtrack-password-file ~/.lde/dtrack-admin.local.txt`. Auto mode still blocks the agent from rotating the admin password.
+
+**Password file does not match (already bootstrapped, not factory).** Nothing has changed yet.
+1. Read the audit log: `docker compose exec dtrack-apiserver cat /data/.dependency-track/dependency-track-audit.log`. It records every login and password change.
 2. Compare it with the file's modification time. A file rewritten with no matching `Python-urllib` entries in the log was written by `bootstrap_dtrack.py` against another instance, most likely AWS. That file is that instance's password: keep a copy before anything replaces it.
 3. Hand the user the recovery procedure in `docs/start-fresh.md#recover-the-dependency-track-admin-password`. Writing a password hash is a credential change: the user runs it, and auto mode blocks the agent from doing so.
 4. Meanwhile, offer `--keep-dtrack`, which clears LDE without the admin login.
 
-`bootstrap_dtrack.py` serves a fresh Dependency-Track volume only. On a bootstrapped one, it cannot recover a password, and every run creates an API key it never saves.
+`bootstrap_dtrack.py` serves a fresh Dependency-Track volume only. On a bootstrapped one it cannot recover a password. A local run writes the API key to `~/.lde/dtrack-api-key.txt` and into `.settings.json`.
 
 **`port … is held by PID …`.** Report the process. The user decides whether it stops.
 

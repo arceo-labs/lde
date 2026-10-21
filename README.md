@@ -154,15 +154,20 @@ docker compose up -d dtrack-apiserver dtrack-frontend
 # 2) Bootstrap DT: rotate the fresh admin password, grant
 #    PROJECT_CREATION_UPLOAD on the Automation team, create an API key.
 #    Stock Automation already has VIEW_PORTFOLIO (used by package search).
+#    Use --password-out ~/.lde/dtrack-admin.local.txt so ~/.lde/dtrack-admin.txt
+#    is not overwritten if it holds another instance (for example AWS).
 DTRACK_ADMIN_PASSWORD=admin python3 scripts/bootstrap_dtrack.py \
-  --url http://127.0.0.1:8081 --no-aws
-# Writes ~/.lde/dtrack-admin.txt and ~/.lde/dtrack-api-key.txt (mode 0600).
+  --url http://127.0.0.1:8081 --no-aws \
+  --password-out ~/.lde/dtrack-admin.local.txt
+# Writes the local admin password and ~/.lde/dtrack-api-key.txt (mode 0600),
+# and copies the API key into .settings.json as dtrack_api_key.
 # Prints team, permissions, key prefix and length — never the password or key.
 
-# 3) Configure local settings
-cp .settings.json.example .settings.json
-# Edit .settings.json — set dtrack_api_key to the contents of ~/.lde/dtrack-api-key.txt.
-# Override default_orgs to the orgs you want to scan.
+# 3) Configure local settings (skip the copy if bootstrap already created the file)
+cp -n .settings.json.example .settings.json
+# Override default_orgs to the orgs you want to scan. Do not paste the API key
+# by hand unless you skipped bootstrap; start_fresh.py also copies
+# ~/.lde/dtrack-api-key.txt into an empty dtrack_api_key.
 
 # 4) Boot the local app
 python3 server.py
