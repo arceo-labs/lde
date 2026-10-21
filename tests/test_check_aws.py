@@ -97,6 +97,8 @@ def test_allowlist_skipped_for_internal_alb():
     ('lde/github-pat', '{"bad/org": "github_pat_x"}', 'FAIL'),
     ('lde/github-pat', '{"acme": "github_pat_x", "*": "ghp_x"}', 'OK'),
     ('lde/github-pat', '{"acme": "   "}', 'FAIL'),
+    ('lde/github-pat', '{"Acme": "github_pat_a", "acme": "github_pat_b"}', 'FAIL'),
+    ('lde/github-pat', '{"*": "ghp_a", "*": "ghp_b"}', 'FAIL'),
     ('lde/github-pat', '{"acme": " github_pat_x"}', 'FAIL'),
     ('lde/github-pat', '{"acme": "something-else-40-chars-long-xxxxxxxxxxxx"}', 'WARN'),
     ('lde/gemini-api-key', 'REPLACE_ME', 'WARN'),
