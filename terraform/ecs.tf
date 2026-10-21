@@ -64,16 +64,9 @@ resource "aws_ecs_task_definition" "lde" {
       { name = "AWS_DEFAULT_REGION", value = var.aws_region },
     ]
 
-    # These are injected at task startup by the ECS agent from Secrets Manager.
-    # They arrive as env vars and are NOT used directly by the app — the app
-    # reads them via secrets_loader.py at request time.  We include them here
-    # as a convenience for initial deployment; the runtime path is the overlay.
-    secrets = [
-      {
-        name      = "LDE_GITHUB_PAT_HINT"
-        valueFrom = aws_secretsmanager_secret.github_pat.arn
-      },
-    ]
+    # No `secrets` block: the app reads Secrets Manager itself (secrets_loader.py,
+    # via the task role). Injecting a secret here would copy every org's PAT into
+    # the task environment.
 
     mountPoints = [{
       containerPath = "/app/data"
