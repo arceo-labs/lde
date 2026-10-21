@@ -56,7 +56,15 @@ def _valid_branch(branch):
 
 
 class GhError(RuntimeError):
-    pass
+    """GitHub call failed. *status* is the HTTP status when there was one.
+
+    Callers branch on ``status``, never on the message: the message carries
+    the request URL, so an org or repo named ``team404`` would match "404".
+    """
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 def _get_token(org):
@@ -126,7 +134,7 @@ def _request(method, url, *, accept=None, token=None, attempts=0):
                 logger.warning('rate-limited; sleeping %ds (attempt %d)', wait, attempts + 1)
                 time.sleep(wait)
                 return _request(method, url, accept=accept, token=token, attempts=attempts + 1)
-        raise GhError(f'GitHub API {exc.code} for {url}: {exc.reason}') from exc
+        raise GhError(f'GitHub API {exc.code} for {url}: {exc.reason}', status=exc.code) from exc
     except urllib.error.URLError as exc:
         raise GhError(f'GitHub API network error for {url}: {exc.reason}') from exc
 
@@ -185,7 +193,7 @@ def get_repo_default_branch(org, repo):
     try:
         data = _get_json(url, token=token)
     except GhError as exc:
-        if '404' in str(exc) or '403' in str(exc):
+        if exc.status in (404, 403):
             return None
         raise
     return data.get('default_branch') if isinstance(data, dict) else None
@@ -202,8 +210,7 @@ def list_tree_paths(org, repo, branch):
     try:
         data = _get_json(url, token=token)
     except GhError as exc:
-        msg = str(exc)
-        if '404' in msg or '409' in msg:
+        if exc.status in (404, 409):
             # 409 = empty repo; 404 = branch not found
             return []
         raise
@@ -244,8 +251,7 @@ def fetch_dependency_sbom(org, repo):
     try:
         return _get_json(url, token=token)
     except GhError as exc:
-        msg = str(exc)
-        if '404' in msg or '403' in msg:
+        if exc.status in (404, 403):
             return None
         raise
 
@@ -275,7 +281,7 @@ def _post_graphql(query, variables=None, *, token=None, attempts=0):
                            exc.code, wait, attempts + 1)
             time.sleep(wait)
             return _post_graphql(query, variables, token=token, attempts=attempts + 1)
-        raise GhError(f'GitHub GraphQL {exc.code}: {exc.reason}') from exc
+        raise GhError(f'GitHub GraphQL {exc.code}: {exc.reason}', status=exc.code) from exc
     except urllib.error.URLError as exc:
         raise GhError(f'GitHub GraphQL network error: {exc.reason}') from exc
     data = json.loads(body)
@@ -307,8 +313,7 @@ def fetch_dependency_diff(org, repo, base, head):
     try:
         result = _get_json(url, token=token)
     except GhError as exc:
-        msg = str(exc)
-        if '404' in msg or '403' in msg:
+        if exc.status in (404, 403):
             return None
         raise
     return result if isinstance(result, list) else []

@@ -411,6 +411,9 @@ def secret_shape(secret_id, value):
                 and isinstance(t, str) and t and t == t.strip() for k, t in doc.items()):
             return 'FAIL', (f'{secret_id} must map each GitHub org (or "*") to a non-empty token '
                             'with no surrounding whitespace')
+        unset = sorted(k for k, tok in doc.items() if tok == PLACEHOLDER)
+        if unset:
+            return 'FAIL', f'{secret_id} is still {PLACEHOLDER} for: {", ".join(unset)}'
         lowered = [k.lower() for k in keys]
         dupes = sorted({k for k in lowered if lowered.count(k) > 1})
         if dupes:
