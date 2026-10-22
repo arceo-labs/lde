@@ -86,8 +86,12 @@ class _FakeResp:
     def getheader(self, name, default=None):
         return self._headers.get(name.lower(), default)
 
-    def read(self):
-        return self._body
+    def read(self, amt=None):
+        if amt is None:
+            data, self._body = self._body, b''
+            return data
+        chunk, self._body = self._body[:amt], self._body[amt:]
+        return chunk
 
 
 class _UndrainableResp(_FakeResp):
@@ -438,3 +442,72 @@ def test_http_error_retries_next_user_agent(monkeypatch):
     html = package_extractor._fetch_url('http://advisory.example/cve')
     assert 'word' in html
     assert statuses == []
+
+
+def test_content_length_over_limit_is_rejected_without_reading(monkeypatch):
+    monkeypatch.setattr(package_extractor, '_MAX_RESPONSE_BYTES', 100)
+
+    def fake_gai(host, port, proto=0, **_kw):
+        return _addrinfo('8.8.8.8', port)
+
+    def http_conn(*args, **kwargs):
+        conn = _FakeConn(*args, **kwargs)
+        conn._responses = [_UndrainableResp(
+            headers={'Content-Length': '101', 'Content-Type': 'text/html'},
+            body=b'x' * 101,
+        )]
+        return conn
+
+    monkeypatch.setattr(socket, 'getaddrinfo', fake_gai)
+    monkeypatch.setattr(socket, 'create_connection', lambda *a, **k: _FakeSock())
+    monkeypatch.setattr(package_extractor.http.client, 'HTTPConnection', http_conn)
+
+    with pytest.raises(ValueError, match='exceeds 100 bytes'):
+        package_extractor._fetch_url('http://advisory.example/cve')
+
+
+def test_body_without_content_length_is_capped_while_reading(monkeypatch):
+    monkeypatch.setattr(package_extractor, '_MAX_RESPONSE_BYTES', 100)
+    monkeypatch.setattr(package_extractor, '_READ_CHUNK', 32)
+
+    def fake_gai(host, port, proto=0, **_kw):
+        return _addrinfo('8.8.8.8', port)
+
+    def http_conn(*args, **kwargs):
+        conn = _FakeConn(*args, **kwargs)
+        conn._responses = [_FakeResp(
+            headers={'Content-Type': 'text/html'},
+            body=b'x' * 150,
+        )]
+        return conn
+
+    monkeypatch.setattr(socket, 'getaddrinfo', fake_gai)
+    monkeypatch.setattr(socket, 'create_connection', lambda *a, **k: _FakeSock())
+    monkeypatch.setattr(package_extractor.http.client, 'HTTPConnection', http_conn)
+
+    with pytest.raises(ValueError, match='exceeds 100 bytes'):
+        package_extractor._fetch_url('http://advisory.example/cve')
+
+
+def test_body_at_limit_is_accepted(monkeypatch):
+    body = _html(50)
+    monkeypatch.setattr(package_extractor, '_MAX_RESPONSE_BYTES', len(body))
+
+    def fake_gai(host, port, proto=0, **_kw):
+        return _addrinfo('8.8.8.8', port)
+
+    def http_conn(*args, **kwargs):
+        conn = _FakeConn(*args, **kwargs)
+        conn._responses = [_FakeResp(
+            headers={'Content-Type': 'text/html; charset=utf-8',
+                     'Content-Length': str(len(body))},
+            body=body,
+        )]
+        return conn
+
+    monkeypatch.setattr(socket, 'getaddrinfo', fake_gai)
+    monkeypatch.setattr(socket, 'create_connection', lambda *a, **k: _FakeSock())
+    monkeypatch.setattr(package_extractor.http.client, 'HTTPConnection', http_conn)
+
+    html = package_extractor._fetch_url('http://advisory.example/cve')
+    assert 'word' in html

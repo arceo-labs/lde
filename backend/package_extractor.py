@@ -34,6 +34,10 @@ _FETCH_TIMEOUT_S = 30
 _MAX_REDIRECTS = 5
 # Same set urllib.request.HTTPRedirectHandler follows for GET.
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+# Advisory HTML is small; 2 MiB is well above a real page and far below
+# what an unbounded resp.read() could allocate from a caller-supplied URL.
+_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_READ_CHUNK = 64 * 1024
 
 
 # RFC 6598 shared/CGNAT address space (100.64.0.0/10). Some cloud providers
@@ -126,6 +130,43 @@ def _response_charset(resp):
     return msg.get_content_charset() or 'utf-8'
 
 
+def _content_length(resp):
+    raw = resp.getheader('Content-Length')
+    if raw is None:
+        return None
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if n < 0:
+        return None
+    return n
+
+
+def _read_bounded(resp, limit=None):
+    """Return the response body, or raise ValueError if it exceeds *limit* bytes.
+
+    Rejects a too-large Content-Length before reading. Always counts bytes
+    while streaming so a missing or lying Content-Length cannot OOM the worker.
+    """
+    if limit is None:
+        limit = _MAX_RESPONSE_BYTES
+    declared = _content_length(resp)
+    if declared is not None and declared > limit:
+        raise ValueError(f'Response body exceeds {limit} bytes')
+    chunks = []
+    total = 0
+    while True:
+        chunk = resp.read(_READ_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise ValueError(f'Response body exceeds {limit} bytes')
+        chunks.append(chunk)
+    return b''.join(chunks)
+
+
 def _connect_pinned(parsed, hostname, port, ips, timeout):
     """Open a socket to a validated IP and attach it to an HTTP(S) connection.
 
@@ -186,7 +227,7 @@ def _http_get_pinned(url, headers, timeout=_FETCH_TIMEOUT_S):
             if resp.status >= 300:
                 reason = resp.reason or str(resp.status)
                 raise OSError(reason)
-            body = resp.read()
+            body = _read_bounded(resp)
             return body.decode(_response_charset(resp), errors='replace')
         finally:
             conn.close()
