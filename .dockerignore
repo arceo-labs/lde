@@ -25,6 +25,8 @@
 !backend/db.py
 !backend/dtrack_client.py
 !backend/extractor.py
+!backend/gh_app.py
+!backend/gh_app_setup.py
 !backend/gh_auth.py
 !backend/github_client.py
 !backend/github_sbom.py

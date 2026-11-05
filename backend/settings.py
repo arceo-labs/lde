@@ -13,6 +13,9 @@ SETTINGS_PATH = os.path.join(SERVE_DIR, '.settings.json')
 
 ALLOWED_KEYS = {
     'default_orgs',
+    'github_app_id',
+    'github_app_private_key_path',
+    'github_apps',
     'github_pats',
     'dtrack_url',
     'dtrack_ui_url',
@@ -34,11 +37,33 @@ ALLOWED_KEYS = {
     'enabled_package_managers',
 }
 
-SENSITIVE_KEYS = {'github_pats', 'dtrack_api_key', 'gemini_api_key', 'basic_auth_credentials'}
+# Keys read from .settings.json or LDE_<KEY> env vars only. PUT /api/settings
+# rejects them: the private key path decides which server file is read as a
+# signing key, so it is not settable over HTTP.
+FILE_ONLY_KEYS = {'github_app_private_key_path', 'github_apps'}
+API_WRITABLE_KEYS = ALLOWED_KEYS - FILE_ONLY_KEYS
+
+# github_app_private_key and github_apps_secret are never in ALLOWED_KEYS: they
+# are not read from .settings.json or the API, only overlaid from the
+# lde/github-app secret.
+_SECRET_ONLY_KEYS = {'github_app_private_key', 'github_apps_secret'}
+SENSITIVE_KEYS = {'github_pats', 'dtrack_api_key', 'gemini_api_key', 'basic_auth_credentials',
+                  'github_app_private_key'}
+# Removed from GET /api/settings entirely rather than masked. /api/gh-status
+# describes the apps without their keys or key paths.
+_HIDDEN_KEYS = _SECRET_ONLY_KEYS | {'github_app_private_key_path', 'github_apps'}
 
 DEFAULTS = {
     'default_orgs': [],
-    # GitHub PATs: {"<org-or-user>": "<token>"}. A fine-grained PAT is bound to
+    # GitHub App (docs/github-app.md): numeric App ID, and locally the path of
+    # the app's PEM private key (chmod 600). In AWS the lde/github-app secret
+    # supplies both.
+    'github_app_id': '',
+    'github_app_private_key_path': '',
+    # Several apps, typically one private app per org (Settings -> Create app for
+    # <org> appends here): [{"owner", "app_id", "private_key_path"}].
+    'github_apps': [],
+    # Deprecated fallback for orgs the GitHub App is not installed on. GitHub PATs: {"<org-or-user>": "<token>"}. A fine-grained PAT is bound to
     # one resource owner, so reviewing several orgs needs one token each.
     'github_pats': {},
     'dtrack_url': 'http://localhost:8081',
@@ -159,18 +184,19 @@ def load_settings():
         env_val = os.environ.get('LDE_' + key.upper())
         if env_val is None:
             continue
-        if key == 'github_pats':
+        if key in ('github_pats', 'github_apps'):
             try:
                 env_val = json.loads(env_val)
             except ValueError:
                 continue
-            if not isinstance(env_val, dict):
+            if not isinstance(env_val, dict if key == 'github_pats' else list):
                 continue
         merged[key] = env_val
     return merged
 
 
 _PAT_OWNER_RE = re.compile(r'^(\*|[A-Za-z0-9._-]+)$')
+_APP_ID_RE = re.compile(r'^[0-9]{1,20}$')
 _MASK_SUFFIX = '…'
 
 
@@ -206,12 +232,21 @@ def save_settings(updates):
             continue
         if k == 'github_pats':
             current[k] = merge_github_pats(current.get(k), v)
+        elif k == 'github_app_id':
+            current[k] = _clean_app_id(v)
+        elif k == 'github_apps':
+            if not isinstance(v, list):
+                raise ValueError('github_apps must be a list')
+            current[k] = v
         else:
             current[k] = v
     # load_settings() drops the retired github_pat. Keep it on disk, untouched, until
     # the user moves it into github_pats and deletes it, so an unrelated save does not
     # destroy the token or the "old config" notice. It never goes into the return value.
     on_disk = dict(current)
+    # Secrets Manager values are never persisted to the settings file.
+    for k in _SECRET_ONLY_KEYS:
+        on_disk.pop(k, None)
     legacy = _stored_legacy_pat()
     if legacy is not None:
         on_disk['github_pat'] = legacy
@@ -219,6 +254,16 @@ def save_settings(updates):
         json.dump(on_disk, f, indent=2)
     os.chmod(SETTINGS_PATH, 0o600)
     return current
+
+
+def _clean_app_id(value):
+    """Return *value* as a GitHub App ID string ('' clears it); ValueError when malformed."""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError('github_app_id must be the numeric App ID')
+    value = str(value).strip()
+    if value and not _APP_ID_RE.match(value):
+        raise ValueError('github_app_id must be the numeric App ID')
+    return value
 
 
 def _stored_legacy_pat():
@@ -231,7 +276,7 @@ def _stored_legacy_pat():
 
 
 def masked(settings):
-    out = dict(settings)
+    out = {k: v for k, v in settings.items() if k not in _HIDDEN_KEYS}
     for k in SENSITIVE_KEYS:
         val = out.get(k)
         if val is None:

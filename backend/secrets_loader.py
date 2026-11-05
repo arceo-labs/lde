@@ -15,9 +15,13 @@ environment variable (ECS sets these automatically on Fargate).
 Secret format
 -------------
 All secrets are plain strings except ``lde/basic-auth``, which is a JSON
-object of the form ``{"<username>": "<sha256_of_password>", ...}``, and
-``lde/github-pat``, a JSON object mapping each GitHub org to its PAT.
+object of the form ``{"<username>": "<sha256_of_password>", ...}``,
+``lde/github-app``, a JSON object holding the GitHub App's ID and PEM
+private key, and ``lde/github-pat``, a JSON object mapping each GitHub org to
+its (deprecated) PAT.
 
+    lde/github-app       → settings keys ``github_app_id`` and ``github_app_private_key``
+                            (JSON object ``{"app_id": "<id>", "private_key": "-----BEGIN…"}``)
     lde/github-pat       → settings key ``github_pats`` (JSON object ``{"<org>": "<token>"}``)
     lde/dtrack-api-key    → settings key ``dtrack_api_key``
     lde/gemini-api-key    → settings key ``gemini_api_key``
@@ -39,6 +43,7 @@ _ENABLED = os.environ.get('LDE_SECRETS_SOURCE', '').lower() == 'aws'
 
 # Mapping of Secrets Manager secret name → settings key
 _SECRET_MAP = {
+    'lde/github-app': '_github_app',  # expands to github_app_id + github_app_private_key
     'lde/github-pat': 'github_pats',
     'lde/dtrack-api-key': 'dtrack_api_key',
     'lde/gemini-api-key': 'gemini_api_key',
@@ -46,6 +51,8 @@ _SECRET_MAP = {
 }
 
 _TIMEOUT = 5
+# Terraform creates each secret shell with this value; it means "not set yet".
+_PLACEHOLDER = 'REPLACE_ME'
 _region = os.environ.get('AWS_DEFAULT_REGION') or os.environ.get('AWS_REGION', 'us-east-1')
 
 # load_settings() runs on every request, ALB health checks included, so an
@@ -104,10 +111,63 @@ def _get_aws_credentials():
 
 
 def _sign_and_fetch(secret_name):
-    """Fetch a single secret value from AWS Secrets Manager using SigV4.
+    """Fetch a single secret value from AWS Secrets Manager (``GetSecretValue``)."""
+    result = _sm_request('GetSecretValue', {'SecretId': secret_name})
+    # GetSecretValue returns SecretString for text secrets
+    return result.get('SecretString', '')
 
-    Implements a minimal SigV4 signed GET request via the Secrets Manager
-    HTTPS endpoint.  Uses the ``GetSecretValue`` action.
+
+def get_secret_fresh(secret_name):
+    """Return *secret_name*'s current value straight from AWS (no cache), or None if absent.
+
+    For read-modify-write of a secret. Raises RuntimeError on failure.
+    """
+    if secret_name not in _SECRET_MAP:
+        raise ValueError(f'Not an LDE secret: {secret_name}')
+    try:
+        return _sign_and_fetch(secret_name)
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        if exc.code == 404:
+            return None
+        raise RuntimeError(f'AWS Secrets Manager refused to read {secret_name} '
+                           f'(HTTP {exc.code}).') from None
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f'Could not read {secret_name} from AWS Secrets Manager: '
+                           f'{type(exc).__name__}') from None
+
+
+def put_secret(secret_name, value):
+    """Write *value* as the new current version of *secret_name* (``PutSecretValue``).
+
+    Only secrets in _SECRET_MAP can be written, and the cached copy is dropped
+    so the next load_settings() reads the new value. The value is never logged.
+    Raises RuntimeError on any failure, with no AWS response body in the message.
+    """
+    if secret_name not in _SECRET_MAP:
+        raise ValueError(f'Not an LDE secret: {secret_name}')
+    try:
+        _sm_request('PutSecretValue', {'SecretId': secret_name, 'SecretString': value})
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        raise RuntimeError(f'AWS Secrets Manager refused the write to {secret_name} '
+                           f'(HTTP {exc.code}). The task role needs '
+                           f'secretsmanager:PutSecretValue on it.') from None
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f'Could not write {secret_name} to AWS Secrets Manager: '
+                           f'{type(exc).__name__}') from None
+    with _cache_locks[secret_name]:
+        _cache.pop(secret_name, None)
+
+
+def _sm_request(target, body):
+    """Send one SigV4-signed Secrets Manager API call (*target*, JSON *body*); return the JSON reply.
+
+    Implements a minimal SigV4 signed POST via the Secrets Manager HTTPS endpoint.
     """
     import base64
     import datetime
@@ -134,7 +194,7 @@ def _sign_and_fetch(secret_name):
     amz_date = now.strftime('%Y%m%dT%H%M%SZ')
     date_stamp = now.strftime('%Y%m%d')
 
-    payload = json.dumps({'SecretId': secret_name})
+    payload = json.dumps(body)
     payload_bytes = payload.encode('utf-8')
     payload_hash = hashlib.sha256(payload_bytes).hexdigest()
 
@@ -148,7 +208,7 @@ def _sign_and_fetch(secret_name):
         'Content-Type': 'application/x-amz-json-1.1',
         'Host': host,
         'X-Amz-Date': amz_date,
-        'X-Amz-Target': 'secretsmanager.GetSecretValue',
+        'X-Amz-Target': f'secretsmanager.{target}',
     }
     if session_token:
         headers_dict['X-Amz-Security-Token'] = session_token
@@ -199,10 +259,7 @@ def _sign_and_fetch(secret_name):
 
     req = urllib.request.Request(endpoint, data=payload_bytes, headers=headers_dict, method='POST')
     with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-        result = json.loads(resp.read())
-
-    # GetSecretValue returns SecretString for text secrets
-    return result.get('SecretString', '')
+        return json.loads(resp.read())
 
 
 def _cached_fetch(secret_name):
@@ -239,6 +296,8 @@ def _parse_pats(raw):
 
     The value is never logged, only the fact that it was rejected.
     """
+    if raw.strip() == _PLACEHOLDER:
+        return {}  # PATs are optional now that the GitHub App is the primary credential
     try:
         doc = json.loads(raw)
     except ValueError:
@@ -249,6 +308,53 @@ def _parse_pats(raw):
                        '(a plain-string token is the old format); ignoring it')
         return {}
     return doc
+
+
+def _app_entry_ok(e):
+    app_id = e.get('app_id') if isinstance(e, dict) else None
+    if isinstance(app_id, int) and not isinstance(app_id, bool):
+        app_id = str(app_id)
+    return (isinstance(app_id, str) and app_id.strip().isdigit()
+            and isinstance(e.get('owner', ''), str)
+            and isinstance(e.get('private_key'), str) and '-----BEGIN' in e['private_key'])
+
+
+def _parse_app(raw):
+    """Parse lde/github-app into settings keys; {} when unusable.
+
+    Two shapes are accepted:
+
+    - ``{"apps": [{"owner", "app_id", "private_key"}, ...]}`` -> ``github_apps_secret``
+    - ``{"app_id", "private_key"}`` (one app) -> ``github_app_id`` + ``github_app_private_key``
+
+    Only the shape is checked here; gh_app validates entries and parses keys. The
+    value is never logged, only the fact that it was rejected.
+    """
+    if raw.strip() == _PLACEHOLDER:
+        return {}
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        doc = None
+    if isinstance(doc, dict) and 'apps' in doc:
+        apps = doc['apps']
+        if not isinstance(apps, list) or not all(_app_entry_ok(e) for e in apps):
+            logger.warning('secret lde/github-app must be {"apps": [{"owner": "<org>", '
+                           '"app_id": "<numeric id>", "private_key": "<PEM>"}]}; ignoring it')
+            return {}
+        return {'github_apps_secret': [
+            {'owner': e.get('owner', ''), 'app_id': str(e['app_id']).strip(),
+             'private_key': e['private_key']} for e in apps]}
+    app_id = doc.get('app_id') if isinstance(doc, dict) else None
+    key = doc.get('private_key') if isinstance(doc, dict) else None
+    if isinstance(app_id, int) and not isinstance(app_id, bool):
+        app_id = str(app_id)
+    if (not isinstance(app_id, str) or not app_id.strip().isdigit()
+            or not isinstance(key, str) or '-----BEGIN' not in key):
+        logger.warning('secret lde/github-app must be a JSON object '
+                       '{"app_id": "<numeric id>", "private_key": "<PEM>"}; ignoring it')
+        return {}
+    return {'github_app_id': app_id.strip(), 'github_app_private_key': key}
 
 
 def overlay(settings_dict):
@@ -264,6 +370,10 @@ def overlay(settings_dict):
     for secret_name, settings_key in _SECRET_MAP.items():
         try:
             value = _cached_fetch(secret_name)
+            if settings_key == '_github_app':
+                if value:
+                    settings_dict.update(_parse_app(value))
+                continue
             if value and settings_key == 'github_pats':
                 value = _parse_pats(value)
             if value:

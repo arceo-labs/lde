@@ -15,7 +15,7 @@ from backend import gh_auth  # noqa: E402
 
 AWS_SETTINGS_503 = (
     'Settings cannot be changed through the UI on this deployment. '
-    'Write lde/github-pat, lde/dtrack-api-key, and lde/gemini-api-key in AWS Secrets Manager '
+    'Write lde/github-app, lde/dtrack-api-key, and lde/gemini-api-key in AWS Secrets Manager '
     '(docs/aws-deployment.md ## Step 4 — Populate secrets). '
     'LDE reads Secrets Manager within a minute.'
 )
@@ -29,7 +29,8 @@ class GhAuthTests(unittest.TestCase):
             status = gh_auth.auth_status()
         self.assertFalse(status['installed'])
         self.assertFalse(status['logged_in'])
-        self.assertIn('lde/github-pat', status['raw'])
+        self.assertIn('lde/github-app', status['raw'])
+        self.assertEqual(status['mode'], 'none')
 
     def test_token_401_keeps_existing_sentence(self):
         err = HTTPError(

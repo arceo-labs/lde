@@ -1,9 +1,15 @@
-"""GitHub API client using urllib.request + a Personal Access Token.
+"""GitHub API client using urllib.request.
 
-Replaces the previous `gh` CLI subprocess approach so the server can run
-headlessly in ECS Fargate (no local gh session required).  The PAT is read
-from settings at call-time via `_get_token()` so it can be overlaid by
-AWS Secrets Manager at runtime without restarting.
+Credentials are chosen per org at call time by `_credential()`:
+
+1. a GitHub App installation token (`backend/gh_app.py`) when an app is
+   configured and installed on the org;
+2. otherwise the org's deprecated PAT from ``github_pats`` (or its ``"*"``
+   entry).
+
+An org with neither is an error, never an unauthenticated request. Settings
+are read at call time so the AWS Secrets Manager overlay applies without a
+restart.
 
 All requests target https://api.github.com only — no user-supplied base URL
 is accepted, eliminating SSRF risk from the GitHub layer.
@@ -16,6 +22,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import quote, urlencode
 
+from . import gh_app
 from . import log as log_mod
 from . import settings as settings_mod
 
@@ -67,43 +74,108 @@ class GhError(RuntimeError):
         self.status = status
 
 
-def _get_token(org):
-    """Return the PAT for *org* from the ``github_pats`` map.
+_pat_warned = set()
 
-    Fine-grained PATs are bound to one resource owner, so each org has its own
-    entry. A ``"*"`` entry is the token for any org without one of its own (for
-    example a classic PAT that spans several orgs). Raises GhError when neither
-    exists: an unknown org is never sent unauthenticated. Settings carry the
-    Secrets Manager overlay applied at load time.
+
+def _credential(org):
+    """Return ``(token, source)`` for *org*; *source* is ``'app'`` or ``'pat'``.
+
+    A GitHub App installed on *org* wins: the app owned by *org* first, then any
+    other configured app. Otherwise the org's own PAT, then the ``"*"`` PAT, is
+    used (deprecated). Raises GhError when none applies, or when an app is
+    configured but broken: a broken app setup fails closed instead of quietly
+    falling back to a PAT.
     """
-    pats = settings_mod.github_tokens(settings_mod.load_settings())
+    cfg = settings_mod.load_settings()
     key = (org or '').lower()
-    if key in pats:
-        return pats[key]
-    if '*' in pats:
-        return pats['*']
-    raise GhError(f'No GitHub PAT configured for org {org!r}. Add one in Settings, '
-                  f'or add a "*" entry to use one token for every other org.')
+    try:
+        apps = gh_app.app_configs(cfg)
+        if apps:
+            token, _ = gh_app.token_for(apps, key)
+            if token:
+                return token, 'app'
+    except gh_app.AppConfigError as exc:
+        raise GhError(f'GitHub App is misconfigured: {exc}') from None
+    except gh_app.AppAuthError as exc:
+        raise GhError(f'GitHub App authentication failed for org {org!r}: {exc}',
+                      status=exc.status) from None
+
+    pats = settings_mod.github_tokens(cfg)
+    token = pats.get(key) or pats.get('*')
+    if token:
+        if key not in _pat_warned:
+            _pat_warned.add(key)
+            logger.warning('org %s is using a GitHub PAT; PATs are deprecated, install the '
+                           'GitHub App on it instead', key)
+        return token, 'pat'
+    if apps:
+        raise GhError(f'No GitHub App is installed on org {org!r}. In Settings, click '
+                      f'"Create app for {key}", or install an existing app on it '
+                      f'(docs/github-app.md).')
+    raise GhError(f'No GitHub credentials for org {org!r}. Configure the GitHub App '
+                  f'(docs/github-app.md), or add a PAT for it in Settings.')
 
 
-def orgs_without_token(orgs):
-    """Return the orgs in *orgs* that have neither their own PAT nor a ``"*"`` entry."""
-    pats = settings_mod.github_tokens(settings_mod.load_settings())
-    if '*' in pats:
-        return []
+def _get_token(org):
+    """Return the token `_credential` picks for *org*."""
+    return _credential(org)[0]
+
+
+def _authed(org, call):
+    """Run ``call(token)`` with *org*'s token; on a 401 from an app token, retry once.
+
+    Installation tokens can be revoked before their expiry (app uninstalled,
+    key rotated). The retry drops the cached token and mints a new one. PATs
+    are not retried: a rejected PAT stays rejected.
+    """
+    token, source = _credential(org)
+    try:
+        return call(token)
+    except GhError as exc:
+        if exc.status != 401 or source != 'app':
+            raise
+    gh_app.invalidate(org)
+    token, _ = _credential(org)
+    return call(token)
+
+
+def orgs_without_credentials(orgs):
+    """Return the orgs in *orgs* that no GitHub App and no PAT covers.
+
+    Raises GhError when the app is configured but broken, or GitHub cannot be
+    reached to check an installation.
+    """
+    cfg = settings_mod.load_settings()
+    pats = settings_mod.github_tokens(cfg)
+    try:
+        apps = gh_app.app_configs(cfg)
+    except gh_app.AppConfigError as exc:
+        raise GhError(f'GitHub App is misconfigured: {exc}') from None
     seen, missing = set(), []
     for org in orgs:
         key = org.lower() if isinstance(org, str) else ''
-        if key not in pats and key not in seen:
-            seen.add(key)
-            missing.append(org if isinstance(org, str) else repr(org))
+        if key in seen:
+            continue
+        seen.add(key)
+        if key in pats or '*' in pats:
+            continue
+        if apps and gh_app._OWNER_RE.match(key):
+            try:
+                if gh_app.token_for(apps, key)[0]:
+                    continue
+            except gh_app.AppConfigError as exc:
+                raise GhError(f'GitHub App is misconfigured: {exc}') from None
+            except gh_app.AppAuthError as exc:
+                raise GhError(f'GitHub App authentication failed for org {org!r}: {exc}',
+                              status=exc.status) from None
+        missing.append(org if isinstance(org, str) else repr(org))
     return missing
 
 
 def _make_headers(token):
     # Fail closed: a request without a token would go to GitHub unauthenticated.
     if not token:
-        raise GhError('No GitHub PAT supplied for this request; refusing to call GitHub '
+        raise GhError('No GitHub token supplied for this request; refusing to call GitHub '
                       'unauthenticated.')
     headers = {
         'Accept': 'application/vnd.github+json',
@@ -178,15 +250,16 @@ def list_repos(org):
     """Return [(repo_name, default_branch), ...] for *org*.
 
     Uses GET /orgs/{org}/repos with pagination.  Archived repos are
-    excluded.  Requires the PAT to be a member of *org* or for the org to
-    have public repos accessible to the token.
+    excluded.  With the GitHub App, only repos the installation was granted
+    are listed.
     """
     if not _ID_RE.match(org or ''):
         raise ValueError(f'Invalid org name: {org!r}')
     params = urlencode({'per_page': 100, 'type': 'all', 'sort': 'full_name'})
     url = f'{_API_BASE}/orgs/{org}/repos?{params}'
     repos = []
-    for entry in _get_paginated(url, token=_get_token(org)):
+    entries = _authed(org, lambda tok: list(_get_paginated(url, token=tok)))
+    for entry in entries:
         if entry.get('archived'):
             continue
         name = entry.get('name')
@@ -206,9 +279,8 @@ def get_repo_default_branch(org, repo):
     if not _ID_RE.match(org or '') or not _ID_RE.match(repo or ''):
         raise ValueError('Invalid org/repo identifier')
     url = f'{_API_BASE}/repos/{org}/{repo}'
-    token = _get_token(org)
     try:
-        data = _get_json(url, token=token)
+        data = _authed(org, lambda tok: _get_json(url, token=tok))
     except GhError as exc:
         if exc.status in (404, 403):
             return None
@@ -223,9 +295,8 @@ def list_tree_paths(org, repo, branch):
     if not _valid_branch(branch):
         raise ValueError(f'Invalid branch name: {branch!r}')
     url = f'{_API_BASE}/repos/{org}/{repo}/git/trees/{quote(branch, safe="")}?recursive=1'
-    token = _get_token(org)
     try:
-        data = _get_json(url, token=token)
+        data = _authed(org, lambda tok: _get_json(url, token=tok))
     except GhError as exc:
         if exc.status in (404, 409):
             # 409 = empty repo; 404 = branch not found
@@ -243,11 +314,11 @@ def fetch_file(org, repo, path):
     if '..' in parts or path.startswith('/'):
         raise ValueError(f'Path traversal in {path!r}')
     url = f'{_API_BASE}/repos/{org}/{repo}/contents/{path}'
-    body, _ = _request(
+    body, _ = _authed(org, lambda tok: _request(
         'GET', url,
         accept='application/vnd.github.v3.raw',
-        token=_get_token(org),
-    )
+        token=tok,
+    ))
     return body.decode('utf-8', errors='replace')
 
 
@@ -264,9 +335,8 @@ def fetch_dependency_sbom(org, repo):
     if not _ID_RE.match(org or '') or not _ID_RE.match(repo or ''):
         raise ValueError('Invalid org/repo identifier')
     url = f'{_API_BASE}/repos/{org}/{repo}/dependency-graph/sbom'
-    token = _get_token(org)
     try:
-        return _get_json(url, token=token)
+        return _authed(org, lambda tok: _get_json(url, token=tok))
     except GhError as exc:
         if exc.status in (404, 403):
             return None
@@ -326,9 +396,8 @@ def fetch_dependency_diff(org, repo, base, head):
         raise ValueError('Invalid base/head ref')
     basehead = f'{quote(base, safe="")}...{quote(head, safe="")}'
     url = f'{_API_BASE}/repos/{org}/{repo}/dependency-graph/compare/{basehead}'
-    token = _get_token(org)
     try:
-        result = _get_json(url, token=token)
+        result = _authed(org, lambda tok: _get_json(url, token=tok))
     except GhError as exc:
         if exc.status in (404, 403):
             return None

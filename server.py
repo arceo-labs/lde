@@ -24,6 +24,7 @@ from urllib.parse import urlparse, parse_qs
 from backend import (
     db,
     dtrack_client,
+    gh_app_setup,
     gh_auth,
     github_client,
     log as log_mod,
@@ -109,6 +110,8 @@ ROUTES = [
     ('GET',  r'^/api/settings$',                                'handle_get_settings'),
     ('PUT',  r'^/api/settings$',                                'handle_put_settings'),
     ('GET',  r'^/api/gh-status$',                               'handle_gh_status'),
+    ('POST', r'^/api/gh-app/manifest$',                         'handle_gh_app_manifest'),
+    ('GET',  r'^/api/gh-app/callback$',                         'handle_gh_app_callback'),
     ('GET',  r'^/api/dtrack-status$',                           'handle_dtrack_status'),
     ('GET',  r'^/api/gemini-status$',                           'handle_gemini_status'),
 
@@ -303,7 +306,8 @@ class Handler(BaseHTTPRequestHandler):
             "object-src 'none'; "
             "frame-ancestors 'none'; "
             "base-uri 'self'; "
-            "form-action 'self'"
+            # github.com: Settings form-posts the GitHub App manifest there.
+            "form-action 'self' https://github.com"
         )
         # The ALB terminates TLS and sets X-Forwarded-Proto=https on the hop
         # to this task. Emit HSTS only on the HTTPS path so local dev over
@@ -391,7 +395,7 @@ class Handler(BaseHTTPRequestHandler):
         if os.environ.get('LDE_SECRETS_SOURCE', '').lower() == 'aws':
             self._json_response(503, {
                 'error': 'Settings cannot be changed through the UI on this deployment. '
-                         'Write lde/github-pat, lde/dtrack-api-key, and lde/gemini-api-key in '
+                         'Write lde/github-app, lde/dtrack-api-key, and lde/gemini-api-key in '
                          'AWS Secrets Manager (docs/aws-deployment.md ## Step 4 — Populate secrets). '
                          'LDE reads Secrets Manager within a minute.'
             })
@@ -399,7 +403,11 @@ class Handler(BaseHTTPRequestHandler):
         patch = self._read_body()
         if not isinstance(patch, dict):
             raise ValueError('Body must be a JSON object')
-        unknown = set(patch.keys()) - settings_mod.ALLOWED_KEYS
+        file_only = set(patch.keys()) & settings_mod.FILE_ONLY_KEYS
+        if file_only:
+            raise ValueError(f'{sorted(file_only)} can only be set in .settings.json or an '
+                             'LDE_<KEY> environment variable, not through the API')
+        unknown = set(patch.keys()) - settings_mod.API_WRITABLE_KEYS
         if unknown:
             raise ValueError(f'Unknown settings keys: {sorted(unknown)}')
         updated = settings_mod.save_settings(patch)
@@ -407,6 +415,49 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_gh_status(self, groups, qs):
         self._json_response(200, gh_auth.auth_status())
+
+    def handle_gh_app_manifest(self, groups, qs):
+        """Start GitHub App creation: return the manifest and the github.com URL to post it to.
+
+        The app's redirect URL is built from the request's Origin, which must be an
+        allowed origin, never from the Host header.
+        """
+        origin = (self.headers.get('Origin') or '').rstrip('/')
+        if not origin or not _origin_allowed(origin):
+            raise ValueError('Creating a GitHub App needs a request from the LDE page itself '
+                             '(an allowed Origin header). Set LDE_ALLOWED_ORIGIN when LDE is '
+                             'not on localhost.')
+        body = self._read_body()
+        if not isinstance(body, dict):
+            raise ValueError('Body must be a JSON object')
+        unknown = set(body) - {'org', 'name'}
+        if unknown:
+            raise ValueError(f'Unknown fields: {sorted(unknown)}')
+        self._json_response(200, gh_app_setup.start(
+            origin, org=body.get('org', ''), name=body.get('name', '')))
+
+    def handle_gh_app_callback(self, groups, qs):
+        """GitHub's redirect after the user creates the app. Always answers with a redirect."""
+        code = (qs.get('code') or [''])[0]
+        state = (qs.get('state') or [''])[0]
+        try:
+            app = gh_app_setup.complete(code, state)
+        except gh_app_setup.SetupError as exc:
+            logger.warning('GitHub App setup failed (%s): %s', exc.reason, log_mod.safe(str(exc)))
+            self._redirect(f'/settings?gh_app_error={exc.reason}')
+            return
+        # Straight on to installing the new app; its setup_url brings the user back.
+        self._redirect(gh_app_setup.install_url(app['slug']) or '/settings?gh_app=created')
+
+    def _redirect(self, location):
+        self._response_status = 303
+        self.send_response(303)
+        self.send_header('Location', location)
+        self.send_header('Content-Length', '0')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self._security_headers()
+        self.end_headers()
 
     def handle_dtrack_status(self, groups, qs):
         """Validate the saved Dependency-Track API key against DT.
@@ -524,15 +575,17 @@ class Handler(BaseHTTPRequestHandler):
                 'from .settings.json.example. Replace default_orgs in Settings with your real orgs, '
                 'or pass orgs explicitly.')
 
-        # Fail fast: an org with no PAT (and no "*" entry) would only fail later,
-        # inside the pipeline, where it is logged and skipped.
+        # Fail fast: an org the GitHub App is not installed on (and with no PAT
+        # fallback) would only fail later, inside the pipeline, where it is
+        # logged and skipped.
         if method == 'github_sbom':
-            missing = github_client.orgs_without_token(check_orgs)
+            missing = github_client.orgs_without_credentials(check_orgs)
             if missing:
                 shown = ', '.join(str(o)[:80] for o in missing[:10])
                 raise ValueError(
-                    f'No GitHub PAT configured for: {shown}. Add one per org in Settings, '
-                    'or add a "*" entry to use one token for every other org.')
+                    f'No GitHub credentials for: {shown}. In Settings, click "Create app for '
+                    '<org>" for each, or install an existing GitHub App on them '
+                    '(docs/github-app.md).')
 
         # Optional run-level branch override. `use_default` (or an empty
         # branch) means "use each repo's configured/default branch", stored

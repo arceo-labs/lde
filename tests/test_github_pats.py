@@ -162,13 +162,13 @@ def test_save_preserves_legacy_github_pat_on_disk(tmp_path):
     assert notice
 
 
-def test_orgs_without_token_lists_uncovered_orgs():
+def test_orgs_without_credentials_lists_uncovered_orgs():
     with _cfg(github_pats={'acme': 't'}):
-        assert github_client.orgs_without_token(['Acme', 'b', 'B', 'c']) == ['b', 'c']
+        assert github_client.orgs_without_credentials(['Acme', 'b', 'B', 'c']) == ['b', 'c']
     with _cfg(github_pats={'acme': 't', '*': 'any'}):
-        assert github_client.orgs_without_token(['b']) == []
+        assert github_client.orgs_without_credentials(['b']) == []
     with _cfg(github_pats={}):
-        assert github_client.orgs_without_token(['b']) == ['b']
+        assert github_client.orgs_without_credentials(['b']) == ['b']
 
 
 def test_headers_refuse_to_go_out_unauthenticated():

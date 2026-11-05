@@ -73,7 +73,7 @@ def _with_settings(monkeypatch, **cfg):
 def test_org_without_pat_is_rejected_before_run_is_created(no_default_orgs, monkeypatch):
     _with_settings(monkeypatch, default_orgs=[], github_pats={'acme': 'github_pat_test'})
     handler = _make_handler({'repos': ['other-org/svc'], 'method': 'github_sbom'})
-    with pytest.raises(ValueError, match='No GitHub PAT configured for: other-org'):
+    with pytest.raises(ValueError, match='No GitHub credentials for: other-org'):
         handler.handle_create_run((), {})
     assert no_default_orgs == []
 
@@ -113,7 +113,7 @@ def test_example_org_in_repo_pair_is_rejected(no_default_orgs, monkeypatch):
 
 @pytest.mark.parametrize('pats,match', [
     ({'*': 'ghp_test'}, 'example org'),
-    ({'acme': 'github_pat_test'}, 'No GitHub PAT configured for: other-org'),
+    ({'acme': 'github_pat_test'}, 'No GitHub credentials for: other-org'),
 ])
 def test_mixed_repo_list_checks_qualified_orgs(no_default_orgs, monkeypatch, pats, match):
     # A bare repo keeps requested_orgs at the defaults; the org/repo prefix must still be checked.
