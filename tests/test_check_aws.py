@@ -103,6 +103,15 @@ def test_allowlist_skipped_for_internal_alb():
     ('lde/github-pat', '{"*": "ghp_a", "*": "ghp_b"}', 'FAIL'),
     ('lde/github-pat', '{"acme": " github_pat_x"}', 'FAIL'),
     ('lde/github-pat', '{"acme": "something-else-40-chars-long-xxxxxxxxxxxx"}', 'WARN'),
+    ('lde/github-pat', 'REPLACE_ME', 'OK'),
+    ('lde/github-app', 'REPLACE_ME', 'WARN'),
+    ('lde/github-app', 'not json', 'FAIL'),
+    ('lde/github-app', '{"app_id": "abc", "private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIEabc\\n-----END RSA PRIVATE KEY-----\\n"}', 'FAIL'),
+    ('lde/github-app', '{"app_id": true, "private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIEabc\\n-----END RSA PRIVATE KEY-----\\n"}', 'FAIL'),
+    ('lde/github-app', '{"app_id": "123", "private_key": "MIIEabc"}', 'FAIL'),
+    ('lde/github-app', '{"app_id": "123", "private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIEabc\\n-----END RSA PRIVATE KEY-----\\n"}', 'OK'),
+    ('lde/github-app', '{"app_id": 123, "private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIEabc\\n-----END RSA PRIVATE KEY-----\\n"}', 'OK'),
+    ('lde/github-app', '{"app_id": "123", "private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIEabc\\n-----END RSA PRIVATE KEY-----\\n", "x": 1}', 'WARN'),
     ('lde/gemini-api-key', 'REPLACE_ME', 'WARN'),
     ('lde/gemini-api-key', 'k' * 39, 'OK'),
     ('lde/dtrack-api-key', 'REPLACE_ME', 'FAIL'),
@@ -113,6 +122,62 @@ def test_secret_shape(secret_id, value, level):
     got, message = ca.secret_shape(secret_id, value)
     assert got == level
     assert value.strip() not in message or value.strip() in ('', 'REPLACE_ME')
+
+
+
+def test_secret_shape_never_echoes_the_private_key():
+    value = '{"app_id": "123", "private_key": "-----BEGIN PRIVATE KEY-----\\nSECRETBYTES\\n-----END PRIVATE KEY-----\\n"}'
+    for v in (value, value.replace('"123"', '"x"'), value.replace('-----END', '-----NOPE')):
+        assert 'SECRETBYTES' not in ca.secret_shape('lde/github-app', v)[1]
+
+
+def _secrets_aws(values):
+    def answer(args):
+        return 0, {'SecretString': values.get(args[-1], 'k' * 40)}, ''
+    return FakeAws({('secretsmanager', 'get-secret-value'): answer})
+
+
+_BASIC = '{"admin": "' + 'a' * 64 + '"}'
+_APP = '{"app_id": "1", "private_key": "-----BEGIN PRIVATE KEY-----\\nx\\n-----END PRIVATE KEY-----\\n"}'
+
+
+_PEMJ = '-----BEGIN PRIVATE KEY-----\\nx\\n-----END PRIVATE KEY-----\\n'
+
+
+@pytest.mark.parametrize('value,level', [
+    ('{"apps": [{"owner": "acme", "app_id": "1", "private_key": "' + _PEMJ + '"}]}', 'OK'),
+    ('{"apps": [{"owner": "acme", "app_id": "1", "private_key": "' + _PEMJ + '"},'
+     ' {"owner": "ACME", "app_id": "2", "private_key": "' + _PEMJ + '"}]}', 'FAIL'),
+    ('{"apps": [{"owner": "acme", "app_id": "x", "private_key": "' + _PEMJ + '"}]}', 'FAIL'),
+    ('{"apps": []}', 'FAIL'),
+])
+def test_github_app_list_shape(value, level):
+    got, msg = ca.secret_shape('lde/github-app', value)
+    assert got == level, msg
+    assert 'BEGIN' not in msg
+
+
+def test_check_secrets_warns_without_any_github_credential():
+    # A fresh deploy creates its GitHub App from the running site, so this is not a failure.
+    report = ca.Report()
+    ca.check_secrets(report, _secrets_aws({'lde/basic-auth': _BASIC, 'lde/github-app': 'REPLACE_ME',
+                                           'lde/github-pat': 'REPLACE_ME'}))
+    assert not report.failed
+    assert 'no GitHub credentials yet' in _lines(report) and 'Create GitHub App' in _lines(report)
+
+
+def test_check_secrets_app_only_passes():
+    report = ca.Report()
+    ca.check_secrets(report, _secrets_aws({'lde/basic-auth': _BASIC, 'lde/github-app': _APP,
+                                           'lde/github-pat': 'REPLACE_ME'}))
+    assert not report.failed and 'deprecated' not in _lines(report)
+
+
+def test_check_secrets_warns_on_pat_fallback():
+    report = ca.Report()
+    ca.check_secrets(report, _secrets_aws({'lde/basic-auth': _BASIC, 'lde/github-app': 'REPLACE_ME',
+                                           'lde/github-pat': '{"acme": "github_pat_x"}'}))
+    assert not report.failed and 'deprecated' in _lines(report)
 
 
 # --- leftovers -------------------------------------------------------------

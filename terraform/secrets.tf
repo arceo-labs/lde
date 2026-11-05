@@ -1,14 +1,33 @@
 # These secrets are created as empty shells by Terraform.
 # Populate actual values manually after `terraform apply`:
 #
-#   aws secretsmanager put-secret-value --secret-id lde/github-pat \
-#       --secret-string '{"example-org": "github_pat_...", "another-org": "github_pat_..."}'
+#   aws secretsmanager put-secret-value --secret-id lde/github-app \
+#       --secret-string "$(jq -n --arg id 123456 --rawfile key ~/.lde/github-app.pem \
+#           '{app_id: $id, private_key: $key}')"
+#
+# lde/github-pat is a deprecated fallback for orgs the app is not installed on;
+# leave it REPLACE_ME when every org has the app.
 #
 # NEVER put real values in .tf files or commit them to source control.
 
+resource "aws_secretsmanager_secret" "github_app" {
+  name                    = "lde/github-app"
+  description             = "GitHub App for Library Dependency Explorer, JSON object {app_id, private_key} — Repository permissions: Contents: Read-only, Metadata: Read-only. Installed on every scanned org."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "github_app" {
+  secret_id     = aws_secretsmanager_secret.github_app.id
+  secret_string = "REPLACE_ME"
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
+
 resource "aws_secretsmanager_secret" "github_pat" {
   name                    = "lde/github-pat"
-  description             = "GitHub Fine-Grained PATs for Library Dependency Explorer, JSON object {org: token}, one per org — Repository permissions: Contents: Read-only (covers files, trees, and dependency-graph/sbom), Metadata: Read-only (auto-included, covers org repo listing)"
+  description             = "DEPRECATED fallback: GitHub Fine-Grained PATs for orgs without the LDE GitHub App, JSON object {org: token}, one per org — Repository permissions: Contents: Read-only (covers files, trees, and dependency-graph/sbom), Metadata: Read-only (auto-included, covers org repo listing)"
   recovery_window_in_days = 7
 }
 
