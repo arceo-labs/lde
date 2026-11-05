@@ -4,7 +4,8 @@
 
 ## Code structure
 
-Single-file stdlib HTTP server, zero pip runtime dependencies.
+Single-file stdlib HTTP server. One pip runtime dependency: `cryptography`, used only by
+`backend/gh_app.py` to sign GitHub App JWTs (see `docs/decisions.md` §3, §7).
 
 - `server.py` — all HTTP routes dispatched via `do_GET` / `do_POST` / `_route()`. No framework.
 - `backend/` — pipeline logic, GitHub/DependencyTrack clients, DB, settings, auth helpers

@@ -24,7 +24,9 @@ Then go to **Ingest Dependencies**, enter an org name, and click **Start run**.
 
 | Setting key | Description |
 |---|---|
-| `github_pats` | GitHub fine-grained PATs keyed by org (Contents: Read-only, Metadata: Read-only) |
+| `github_app_id` | Numeric GitHub App ID; see [GitHub App](github-app.md) |
+| `github_app_private_key_path` | Path to the app's PEM key, chmod 600 (`.settings.json` only) |
+| `github_pats` | Deprecated fallback PATs keyed by org, for orgs without the app |
 | `dtrack_url` | Dependency-Track API server URL (default: `http://localhost:8081`) |
 | `dtrack_ui_url` | Dependency-Track frontend URL for deep links (default: `http://localhost:8080`) |
 | `basic_auth_credentials` | JSON string `{"admin": "<sha256_hex>"}` — omit to disable auth in local dev |

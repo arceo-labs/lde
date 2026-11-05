@@ -10,6 +10,7 @@ nav:
   - Usage: usage.md
   - Package Search: pkg-search.md
   - Settings: settings.md
+  - GitHub App: github-app.md
   - API Reference: api.md
   - Architecture: architecture.md
   - Design Decisions: decisions.md

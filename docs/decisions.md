@@ -6,7 +6,7 @@ For the pipeline mechanics see `TRD.md` and `README.md` in the repository root.
 
 ---
 
-## 1. PAT-based GitHub auth replaces `gh` CLI
+## 1. PAT-based GitHub auth replaces `gh` CLI (superseded by decision 7)
 
 **Decision:** All GitHub API calls go through `backend/github_client.py` and `backend/gh_auth.py`
 using the `github_pats` setting (one PAT per org), not the `gh` CLI subprocess.
@@ -37,10 +37,11 @@ code remains in the repository for now and will be removed.
 
 ---
 
-## 3. Zero pip runtime dependencies
+## 3. One pip runtime dependency
 
-**Decision:** The server runs on Python 3.11+ stdlib only. `requirements.txt` lists only
-`pytest` (a test dependency). No Flask, FastAPI, httpx, or any other runtime package.
+**Decision:** The server runs on Python 3.11+ stdlib plus one package, `cryptography`, used only
+to sign GitHub App JWTs (decision 7). No Flask, FastAPI, httpx, or any other runtime package.
+`requirements.txt` pins `cryptography` and lists `pytest` for tests.
 
 **Why:**
 
@@ -55,6 +56,10 @@ code remains in the repository for now and will be removed.
 Manual routing (`ROUTES` table in `server.py`), manual JSON serialization, and manual
 static file serving instead of framework abstractions. The additional boilerplate is
 contained to `server.py` and is straightforward to audit.
+
+**Exception:** The stdlib cannot produce RSA signatures, and hand-written crypto is not an
+option for a security tool. `cryptography` (PyCA) is audited, ships wheels for every target, and
+is pinned to one version. It is imported only by `backend/gh_app.py`.
 
 ---
 
@@ -111,3 +116,61 @@ effect within a minute.
 `basic_auth_credentials` secret causes every request to return 401 — it never falls back
 to open access. Locally (no `LDE_SECRETS_SOURCE`), an absent credential set disables auth
 entirely for development convenience.
+
+---
+
+## 7. GitHub App auth replaces per-org PATs
+
+**Decision:** LDE authenticates to GitHub as one GitHub App installed on every scanned org.
+`backend/gh_app.py` signs a nine-minute app JWT, finds the org's installation, and mints a
+one-hour installation token limited to `contents:read` and `metadata:read`. Per-org PATs
+(`github_pats`) remain as a deprecated fallback for orgs without the app.
+
+**Why:**
+
+- **No personal credentials.** A PAT belongs to a person: it leaves with them, expires on their
+  schedule, and needs SSO re-authorization per org. The app belongs to the org.
+- **Short-lived tokens.** Installation tokens expire after an hour and are never stored. A
+  leaked token is useful for at most that hour; the long-lived secret is the private key, which
+  never leaves Secrets Manager or a 0600 file.
+- **Least privilege, enforced per token.** Each token is minted with only the two read
+  permissions LDE needs, whatever the app is granted.
+- **Rate limits per org.** Each installation has its own budget (5,000–15,000 requests per hour)
+  instead of sharing one user's.
+
+**Trade-off:**
+One runtime dependency (decision 3), and an org owner must install the app on each org. A
+misconfigured app fails closed for every org rather than quietly falling back to PATs.
+
+See [GitHub App](github-app.md).
+
+## 8. One private GitHub App per org, created from Settings
+
+**Decision:** LDE is self-hosted, so there is no shared LDE app. **Settings → Create app for
+&lt;org&gt;** uses GitHub's app manifest flow: GitHub creates a private, read-only app owned by
+that org, and `backend/gh_app_setup.py` exchanges the one-time code for the App ID, owner and
+key on the server. LDE keeps a list of apps (`github_apps` locally, `lde/github-app` on AWS)
+and, for each org, uses the app that org owns, else any other configured app installed there.
+An enterprise-owned app, added by hand, can cover every org in an enterprise. Locally the setup
+writes a new 0600 key file and `.settings.json`. On AWS it writes `lde/github-app`, which gives
+the ECS task role `secretsmanager:PutSecretValue` on that one secret.
+
+**Why:**
+
+- **No hand-copied key.** The manual path has the user download a `.pem`, move it, `chmod` it
+  and paste it into a secret. The manifest flow sends the key from GitHub straight to the server.
+  It never reaches the browser, so the key is still never entered through, or returned by,
+  the UI or API.
+- **Right permissions by default.** The manifest fixes Contents: Read, Metadata: Read and no
+  webhook, so nobody has to find those settings on GitHub's form.
+- **Private apps, any number of orgs.** A private app installs only on its owner, so covering
+  several orgs needs either one app per org or an enterprise-owned app. One app per org works for
+  every account type and lets each org own, inspect and revoke its own app. Making an app public
+  would let any account install it, so LDE never does.
+
+**Trade-off:**
+One private key per org to rotate. The task role can now write one secret, not just read it.
+Setup only ever adds an app: it is refused when the owner GitHub reports already has one, or
+differs from the org setup was started for, and each callback needs a single-use `state` that
+LDE issued within the hour. Pending `state` values are in memory: a restart between **Create**
+and GitHub's redirect means starting again. Removing an app is a manual config edit.

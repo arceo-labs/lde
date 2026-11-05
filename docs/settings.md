@@ -16,7 +16,9 @@ Each key is resolved in this priority order (highest wins):
 4. Built-in default
 
 Sensitive keys (`github_pats`, `dtrack_api_key`, `gemini_api_key`) are truncated to 4 chars + `…`
-in all API responses. Their full values are never returned to the browser.
+in all API responses. Their full values are never returned to the browser. GitHub App private
+keys, `github_apps` and `github_app_private_key_path` are left out of API responses entirely.
+`/api/gh-status` describes each app without its key or key path.
 
 ---
 
@@ -24,13 +26,27 @@ in all API responses. Their full values are never returned to the browser.
 
 | Key | Type | Default | Sensitive |
 |---|---|---|---|
+| `github_apps` | array of `{owner, app_id, private_key_path}` | `[]` | Paths only — `.settings.json` / `LDE_GITHUB_APPS`, not the API |
+| `github_app_id` | string (digits) | `""` | No (older single-app form) |
+| `github_app_private_key_path` | string (path) | `""` | Path only — `.settings.json` / env, not the API (older single-app form) |
 | `github_pats` | object `{org: token}` | `{}` | Yes — each token masked in API responses |
 | `default_orgs` | array of strings | `[]` | No |
 
-**`github_pats`** — One fine-grained PAT per org, as `{"<org>": "<token>"}`. Each needs Contents:
-Read-only and Metadata: Read-only. Required in Fargate and locally.
-An org with no entry is an error, never an unauthenticated call. The key `"*"` is the token for
-any org without its own entry (for example a classic PAT that spans orgs).
+**`github_apps`** — The GitHub Apps LDE authenticates as, usually one private app per org.
+`owner` is the org (or user, or enterprise) that owns the app; LDE tries that app first on that
+org, then every other app. **Settings → Create app for &lt;org&gt;** creates an app and appends it
+here. Key files must be chmod 600. `PUT /api/settings` rejects `github_apps` with `400`. In AWS,
+the `lde/github-app` secret holds the same list, with each key inline. Setup, permissions and
+key handling are in [GitHub App](github-app.md).
+
+**`github_app_id`** and **`github_app_private_key_path`** — The older single-app form. Still
+read, as one app LDE tries on every org. `PUT /api/settings` rejects
+`github_app_private_key_path` with `400`.
+
+**`github_pats`** — **Deprecated.** Used only for orgs no GitHub App is installed on. One
+fine-grained PAT per org, as `{"<org>": "<token>"}`, each with Contents: Read-only and Metadata:
+Read-only. An org that neither the app nor a PAT covers is an error, never an unauthenticated
+call. The key `"*"` is the token for any such org without its own entry.
 `PUT /api/settings` merges per org: send `""` to remove one. `LDE_GITHUB_PATS` (a JSON object)
 overrides the map. In AWS, the secret `lde/github-pat` holds the same JSON object
 ([Step 4](aws-deployment.md)).

@@ -93,28 +93,24 @@ EOF
 
 ## Step 1 — Test code changes locally
 
-Before touching AWS, confirm the PAT-based GitHub client and Basic Auth work
+Before touching AWS, confirm the GitHub App client and Basic Auth work
 on your machine.
 
-### 1a. Test GitHub PAT auth
+### 1a. Test GitHub App auth
 
-1. Generate a GitHub fine-grained PAT from your machine account:
-   - Settings → Developer settings → Personal access tokens → Fine-grained tokens
-   - Resource owner: the organization that owns the repositories, not your user
-   - Repository access: All repositories
-   - Repository permissions:
-     - `Contents: Read-only` — required for fetching files, listing trees, **and** the dependency graph SBOM endpoint (`GET /repos/.../dependency-graph/sbom` is gated by Contents, not a separate permission)
-     - `Metadata: Read-only` — required for listing org repos; always mandatory and auto-included in all fine-grained PATs
-
-2. Start the server and paste the PAT in Settings:
+1. Install the runtime dependency and start the server:
 
 ```bash
 cd library-dependency-explorer
+pip install -r requirements.txt
 python3 server.py
-# Open http://localhost:8002 → Settings → paste PAT → Save
+# Open http://localhost:8002 → Settings
 ```
 
-3. Verify the Settings page shows "authenticated" with your GitHub username.
+2. On the **GitHub auth** card, click **Create app for &lt;org&gt;** for each org and install
+   each app: [GitHub App](github-app.md), Steps 1–2.
+
+3. Click **Test GitHub Apps**. Verify the Settings page shows "authenticated" and `app` next to each org.
 
 4. Trigger a test ingest (Ingest Dependencies → enter one repo → Start run).
    Confirm the run completes and DT shows the new project. Ingest always uses
@@ -287,17 +283,18 @@ Anything else is not a login for those prompts:
 
 | Value | Used for | Secret |
 |---|---|---|
-| GitHub fine-grained PATs | One per org: the resource owner is the org whose repos you scan, not your user account. | `lde/github-pat`, a JSON object `{"<org>": "<token>"}` |
+| GitHub App ID and private key | GitHub access for every org the app is installed on | `lde/github-app`, a JSON object `{"app_id": "<id>", "private_key": "<PEM>"}` |
+| GitHub fine-grained PATs (deprecated) | Fallback only, for orgs without the app. Leave `REPLACE_ME` when the app covers every org. | `lde/github-pat`, a JSON object `{"<org>": "<token>"}` |
 | Dependency-Track API key | Created by `scripts/bootstrap_dtrack.py` in Step 5 | `lde/dtrack-api-key` |
 | Gemini API key | Package-name extraction only. Skip it until you use that feature. | `lde/gemini-api-key` |
 
 The Aurora master password and the AWS console password do not open either site.
 
-Step 3 writes `lde/basic-auth` before plan. The other three `lde/*` shells start as `REPLACE_ME`. The running task reads Secrets Manager within a minute. A new ECS deployment is not required.
+Step 3 writes `lde/basic-auth` before plan. The other four `lde/*` shells start as `REPLACE_ME`. The running task reads Secrets Manager within a minute. A new ECS deployment is not required.
 
 > **Stop here and set the values.** Do not put them in a `.tf` file or commit them.
 
-`lde/basic-auth` stays on `scripts/set_lde_password.py` (Step 3). `lde/dtrack-api-key` is what the bootstrap script writes in Step 5. Write the GitHub PAT and Gemini key with the commands below. `tr -d '\n'` is required because `op item get` prints a trailing newline. LDE reads the secret within a minute.
+`lde/basic-auth` stays on `scripts/set_lde_password.py` (Step 3). `lde/dtrack-api-key` is what the bootstrap script writes in Step 5. Write the GitHub App secret, and the Gemini key, with the commands below. `tr -d '\n'` is required because `op item get` prints a trailing newline. LDE reads the secret within a minute.
 
 Sign in to the 1Password CLI first: turn on 1Password → Settings → Developer →
 **Integrate with 1Password CLI**, or run `op signin`. Then find each item's ID
@@ -314,9 +311,39 @@ than its title: titles with spaces or `#` break the quoting. Paste each command
 whole; a line that wraps without its trailing `\` splits the pipe and writes
 nothing.
 
-### GitHub PATs
+### GitHub App
 
-One fine-grained PAT per org, written as one JSON object. Requires `jq`. Add one `--arg` and one
+Leave `lde/github-app` as `REPLACE_ME` and create the apps from the running site after Step 5:
+open `https://<lde_domain>/settings` and click **Create app for &lt;org&gt;** for each org
+([GitHub App, Step 1](github-app.md#step-1-create-an-app-for-each-org)). LDE adds each app to
+the secret itself; the task role may write `lde/github-app` and no other secret. Until then
+`check_aws.py verify` warns `no GitHub credentials yet`.
+
+For an app created by hand (for example an enterprise-owned app), append it to the secret's
+`apps` list with the read-edit-write commands in [GitHub App, Step 3](github-app.md#aws). The
+older single-app form below still works, as one app LDE tries on every org. Requires `jq`. `--rawfile` keeps the
+key's newlines; they are escaped inside the JSON string.
+
+```bash
+jq -n --arg id <app-id> --rawfile key ~/.lde/github-app.pem \
+    '{app_id: $id, private_key: $key}' \
+  | tr -d '\n' \
+  | aws secretsmanager put-secret-value \
+      --secret-id lde/github-app \
+      --secret-string file:///dev/stdin \
+      --region us-east-1
+```
+
+To keep the key in 1Password instead, store the `.pem` as a document and replace
+`--rawfile key ~/.lde/github-app.pem` with `--arg key "$(op document get <item-id> --vault <vault-name>)"`.
+
+Run `python3 scripts/check_aws.py verify` to confirm the shape without printing the key.
+Creating the app and installing it on each org: [GitHub App](github-app.md).
+
+### GitHub PATs (deprecated fallback)
+
+Skip this when a GitHub App covers every org; leave `lde/github-pat` as `REPLACE_ME`.
+Otherwise, one fine-grained PAT per org, written as one JSON object. Requires `jq`. Add one `--arg` and one
 key per org; each org's key must match its GitHub name.
 
 ```bash
@@ -354,7 +381,7 @@ Leave `lde/dtrack-api-key` as `REPLACE_ME` until Step 5. That key is not the DT 
 
 ### Services already running
 
-Step 3 started the services. Service names use `var.env` (`dev` in the example). Writing a secret does not require `update-service`. LDE loads `lde/github-pat`, `lde/basic-auth`, `lde/dtrack-api-key`, and `lde/gemini-api-key` from Secrets Manager and reuses each value for up to 60 seconds.
+Step 3 started the services. Service names use `var.env` (`dev` in the example). Writing a secret does not require `update-service`. LDE loads `lde/github-app`, `lde/github-pat`, `lde/basic-auth`, `lde/dtrack-api-key`, and `lde/gemini-api-key` from Secrets Manager and reuses each value for up to 60 seconds.
 
 ### Tail logs
 
@@ -545,11 +572,13 @@ aws rds delete-db-cluster-snapshot \
   --db-cluster-snapshot-identifier dev-lde-dtrack-final
 ```
 
-6. The four `lde/*` secrets set `recovery_window_in_days = 7`. Destroy does
+6. The five `lde/*` secrets set `recovery_window_in_days = 7`. Destroy does
    not free the names. Force-delete each one or the next apply cannot create
    the shells.
 
 ```bash
+aws secretsmanager delete-secret --secret-id lde/github-app \
+  --force-delete-without-recovery
 aws secretsmanager delete-secret --secret-id lde/github-pat \
   --force-delete-without-recovery
 aws secretsmanager delete-secret --secret-id lde/dtrack-api-key \

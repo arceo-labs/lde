@@ -19,7 +19,8 @@ To confirm a rotation, wait a minute before testing.
 
 | Secret ID | Setting key | What it authenticates |
 |---|---|---|
-| `lde/github-pat` | `github_pats` | GitHub API — one PAT per org (JSON object): reads repo trees, fetches manifests, SBOM endpoint |
+| `lde/github-app` | `github_app_id`, `github_app_private_key` | GitHub API as the LDE GitHub App: reads repo trees, fetches manifests, SBOM endpoint |
+| `lde/github-pat` | `github_pats` | **Deprecated** fallback — one PAT per org (JSON object), only for orgs without the app |
 | `lde/dtrack-api-key` | `dtrack_api_key` | Dependency-Track API — BOM upload, component search |
 | `lde/gemini-api-key` | `gemini_api_key` | Google Gemini — package extraction from URLs/files |
 | `lde/basic-auth` | `basic_auth_credentials` | HTTP Basic Auth gate on all LDE endpoints |
@@ -34,7 +35,7 @@ Confirm the current credentials are working:
 ALB="https://lde.yourdomain.com"
 BASIC_AUTH="admin:currentpassword"
 
-# GitHub PAT status
+# GitHub App and per-org status
 curl -su "$BASIC_AUTH" "$ALB/api/gh-status" | python3 -m json.tool
 # Expect: "logged_in": true
 
@@ -46,7 +47,51 @@ curl -su "$BASIC_AUTH" -X POST "$ALB/api/dtrack/package-search" \
 
 ---
 
-## Rotating a `github_pats` token
+## Rotating a GitHub App private key
+
+Each app has its own key; rotate them one at a time. GitHub lets an app hold more than one key,
+so rotate without downtime:
+
+1. On the app's settings page (github.com → owner → Settings → Developer settings → GitHub Apps
+   → the app), click **Generate a private key**. GitHub downloads the new `.pem`.
+
+2. Replace that app's `private_key` in the secret's `apps` list, keyed by its App ID (requires
+   `jq`). The temporary file holds every app's key: keep it in `$TMPDIR` and delete it.
+
+   ```bash
+   aws secretsmanager get-secret-value --secret-id lde/github-app \
+       --query SecretString --output text --region us-east-1 --profile your-profile \
+       > "$TMPDIR/lde-github-app.json"
+   jq --arg id <app-id> --rawfile key ~/Downloads/<new-key>.pem \
+       '(.apps[] | select(.app_id == $id) | .private_key) = $key' "$TMPDIR/lde-github-app.json" \
+     | tr -d '\n' \
+     | aws secretsmanager put-secret-value \
+         --secret-id lde/github-app \
+         --secret-string file:///dev/stdin \
+         --region us-east-1 --profile your-profile
+   rm -f "$TMPDIR/lde-github-app.json"
+   ```
+
+   For the older single-app form (`{"app_id", "private_key"}`), write
+   `jq -n --arg id <app-id> --rawfile key <new-key>.pem '{app_id: $id, private_key: $key}'`
+   instead. Locally, overwrite the app's key file and keep it `chmod 600`.
+
+3. Wait a minute, then verify:
+
+   ```bash
+   curl -su "$BASIC_AUTH" "$ALB/api/gh-status" | python3 -m json.tool
+   # Expect: every "apps" entry "ok": true, every "accounts" entry "via": "app", "ok": true
+   ```
+
+4. Delete the old key on the app's settings page, then delete the downloaded `.pem`.
+
+Tokens already minted with the old key stay valid until they expire (at most an hour).
+
+---
+
+## Rotating a `github_pats` token (deprecated)
+
+Prefer installing the GitHub App on the org and removing its PAT ([GitHub App](github-app.md#migrate-from-pats)).
 
 1. Generate a new fine-grained PAT on GitHub:
    - Settings → Developer settings → Personal access tokens → Fine-grained tokens
@@ -245,6 +290,8 @@ so a future `terraform apply` does not revert the window.
 ## Rollback
 
 If the new credential doesn't work, restore the previous version:
+
+Replace `lde/github-pat` with the secret you rotated (for example `lde/github-app`).
 
 ```bash
 # List previous versions

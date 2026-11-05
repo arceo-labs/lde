@@ -6,11 +6,10 @@
     "another-org",
     "example-website"
   ],
-  "github_pats": {
-    "example-org": "",
-    "another-org": ""
-  },
-  "_github_pats_note": "One fine-grained PAT per org — Contents: Read-only + Metadata: Read-only. Use a \"*\" key for a token that covers every other org (e.g. a classic PAT). Required in Fargate and locally.",
+  "github_apps": [],
+  "_github_apps_note": "GitHub Apps, usually one private app per org: [{\"owner\": \"<org>\", \"app_id\": \"<id>\", \"private_key_path\": \"~/.lde/github-app-<id>.pem\"}]. Settings -> Create app for <org> appends here. Contents: Read-only + Metadata: Read-only. Key files must be chmod 600. Not settable through the API. In AWS the lde/github-app secret holds the list. See docs/github-app.md.",
+  "github_pats": {},
+  "_github_pats_note": "DEPRECATED fallback for orgs without the GitHub App: one fine-grained PAT per org, {\"<org>\": \"<token>\"}. A \"*\" key covers every other such org.",
   "gemini_model": "gemini-3.8-flash",
   "_gemini_model_note": "Gemini model used for package extraction. Override without redeploying via LDE_GEMINI_MODEL env var or PUT /api/settings.",
   "dtrack_url": "http://localhost:8081",

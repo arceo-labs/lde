@@ -119,20 +119,19 @@ Gemini URL extraction works well for standard advisory sites but has two failure
               OWASP Dependency-Track  (PUT /api/v1/bom)
 ```
 
-<!-- updated: gh CLI replaced by PAT-based urllib in github_client.py / gh_auth.py -->
-Each component is small, single-responsibility, and pure-stdlib Python — no Flask/FastAPI, no SDKs. All GitHub API calls use Personal Access Tokens (`github_pats` setting, one per org) read from `.settings.json` or AWS Secrets Manager — no `gh` CLI subprocess is required.
+Each component is small, single-responsibility Python — no Flask/FastAPI, no SDKs. The only runtime package is `cryptography`, which signs GitHub App JWTs. All GitHub API calls authenticate as a GitHub App installed on each org ([docs/github-app.md](docs/github-app.md)); per-org PATs remain as a deprecated fallback. No `gh` CLI subprocess is required.
 
 ## Prerequisites
 
 | Dependency | Required for | How to install |
 |---|---|---|
-<!-- updated: gh CLI no longer required; GitHub access is PAT-based (github_client.py) -->
 | Python 3.11+ | The server | `brew install python@3.12` |
-| GitHub PAT | Ingest | Fine-grained token — Contents: Read-only, Metadata: Read-only. Paste into Settings after starting the server. |
+| `cryptography` | GitHub App JWT signing | `pip install -r requirements.txt` |
+| GitHub App | Ingest | One private app per org: **Settings → Create app for &lt;org&gt;**, then install it. Optionally one enterprise-owned app for a whole enterprise. Contents: Read-only, Metadata: Read-only. See [docs/github-app.md](docs/github-app.md). |
 | Docker 24+ with Compose v2 | Running Dependency-Track locally | `brew install --cask docker` |
 | `pytest` (tests only) | Testing | `pip install -r requirements.txt` |
 
-Docker runs only Dependency-Track. Ingest itself needs only Python and a GitHub PAT.
+Docker runs only Dependency-Track. Ingest itself needs only Python, `cryptography`, and the GitHub App.
 
 ## Quick start
 
@@ -270,13 +269,15 @@ All app config lives in `.settings.json` (gitignored). Run `cp .settings.json.ex
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `default_orgs` | `[]` of string | `[]` | Orgs scanned when the **Start run** form is left blank. |
-| `github_pats` | object | `{}` | GitHub PATs, `{"<org>": "<token>"}`, one per org (Contents: Read-only, Metadata: Read-only). A `"*"` key is the token for any org without its own entry. Required in Fargate; set in Settings UI or `.settings.json`. Masked in the settings API response. |
+| `github_app_id` | string | `""` | Numeric GitHub App ID. Set in Settings UI or `.settings.json`. |
+| `github_app_private_key_path` | string | `""` | Path to the app's PEM key (chmod 600). `.settings.json` or env only; the API rejects it. In AWS the `lde/github-app` secret supplies the key. |
+| `github_pats` | object | `{}` | **Deprecated.** PATs, `{"<org>": "<token>"}`, used only for orgs the GitHub App is not installed on. A `"*"` key covers any such org without its own entry. Masked in the settings API response. |
 | `dtrack_url` | string | `http://localhost:8081` | Dependency-Track API server URL. Used for all REST API calls. |
 | `dtrack_ui_url` | string | `http://localhost:8080` | Dependency-Track frontend UI URL. Used to construct deep links in Package Search. Separate from `dtrack_url` because DT ships as two Docker services on different ports. |
 | `dtrack_api_key` | string | `""` | DT API key (auto-masked in the settings UI). |
 | `gemini_api_key` | string | `""` | Google Gemini API key. Required for URL and file-upload extraction in Package Search. Auto-masked in the settings UI. Without this key the paste-list mode still works fully. |
 
-**GitHub authentication** uses one Personal Access Token per org, stored under `github_pats` in `.settings.json` (or the `lde/github-pat` secret in AWS Secrets Manager in Fargate). The old single `github_pat` key is no longer read. The Settings page in the UI shows a live PAT validation status via `GET /api/gh-status`.
+**GitHub authentication** uses one GitHub App installed on every scanned org ([docs/github-app.md](docs/github-app.md)). Locally, set `github_app_id` and `github_app_private_key_path`; in Fargate, write the `lde/github-app` secret. Orgs without the app fall back to their deprecated PAT in `github_pats`. The Settings page shows live app and per-org status via `GET /api/gh-status`.
 
 ## HTTP API
 
@@ -313,9 +314,10 @@ library-dependency-explorer/
 ├── pkg-search.sh            # Ad-hoc single-package CLI (see docs/pkg-search.md)
 ├── TRD.md                   # Source of truth for the pipeline design
 ├── backend/
-│   ├── github_client.py     # gh CLI wrapper with rate-limit backoff + fetch_dependency_sbom()
+│   ├── github_client.py     # GitHub REST client with rate-limit backoff + fetch_dependency_sbom()
 │   ├── github_sbom.py       # SPDX 2.3 → CycloneDX 1.4 conversion (github_sbom pipeline)
-│   ├── gh_auth.py           # `gh auth status` parser
+│   ├── gh_app.py            # GitHub App JWT + per-org installation tokens
+│   ├── gh_auth.py           # /api/gh-status: app and per-org auth status
 │   ├── settings.py          # .settings.json load/save with allowlist + masking
 │   ├── db.py                # SQLite WAL: runs, run_repos, manifests + orphan-detection on boot
 │   ├── task_queue.py        # ThreadPoolExecutor for background work
@@ -427,7 +429,7 @@ To start over instead, use **Restart from scratch**, which clones `orgs_json` in
 ### Verification (end-to-end smoke test)
 
 1. `docker compose up -d dtrack-apiserver dtrack-frontend` — confirm DT is up: `curl -sI http://localhost:8081/api/version`
-2. `gh auth status` — confirm logged in and any SSO orgs authorized.
+2. `curl -s http://127.0.0.1:8002/api/gh-status` (after step 3) — confirm `"logged_in": true` and the app is installed on each org.
 3. `python3 server.py` — server starts on http://127.0.0.1:8002.
 4. Start a single-repo run:
    ```bash
