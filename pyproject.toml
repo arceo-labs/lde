@@ -22,8 +22,9 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
 ]
 
-# Runtime uses the Python standard library only — no third-party dependencies.
-dependencies = []
+# Runtime is the Python standard library plus cryptography, used only to sign
+# GitHub App JWTs (RS256). See docs/decisions.md.
+dependencies = ["cryptography==46.0.3"]
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]

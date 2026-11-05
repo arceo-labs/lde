@@ -43,3 +43,6 @@ dist/
 # Handoff notes and patch folders passed between machines
 *handoff.md
 lde-handoff-*/
+
+# Local Python virtualenv (pip install -r requirements.txt)
+.venv/

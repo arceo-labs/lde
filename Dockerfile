@@ -1,11 +1,15 @@
 # Library Dependency Explorer — production image
-# stdlib-only Python app; no pip install needed at runtime.
+# stdlib Python app plus one runtime package (cryptography, GitHub App JWTs).
 FROM --platform=linux/amd64 python:3.11-slim
 
 # Non-root user for ECS/Fargate
 RUN groupadd -r lde && useradd -r -g lde -d /app -s /sbin/nologin lde
 
 WORKDIR /app
+
+# Install the one runtime dependency before copying source so the layer caches.
+# --only-binary keeps the build to the published wheel (no compiler in -slim).
+RUN pip install --no-cache-dir --only-binary=:all: cryptography==46.0.3
 
 # Copy application source
 COPY --chown=lde:lde . .
