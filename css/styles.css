@@ -215,3 +215,9 @@ button.primary:hover { background: #1e4dcc; }
   align-items: center;
 }
 .branch-discovery-form input[type="text"] { width: auto; flex: 1 1 180px; }
+.gh-orgs { list-style: none; padding-left: 0; margin: 8px 0; }
+.gh-orgs li { margin-bottom: 4px; }
+#pat-section { margin-bottom: 12px; }
+#pat-section summary { cursor: pointer; margin-bottom: 8px; }
+#gh-app-create { margin-top: 12px; }
+#gh-app-create summary { cursor: pointer; margin-bottom: 8px; }

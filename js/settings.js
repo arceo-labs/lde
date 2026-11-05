@@ -4,33 +4,152 @@ import { api } from '/js/api.js';
 // image — safe under the page's img-less CSP.
 const LOCK_ICON = '<span class="secret-icon" title="Secret — masked, write-only">🔒</span>';
 
-function renderGhStatusCard(gh) {
-  const ghEl = document.getElementById('gh-status');
-  if (!ghEl) return;
-  const notice = gh.notice ? `<p><span class="tag warn">old config</span> ${escapeHtml(gh.notice)}</p>` : '';
-  if (!gh.installed) {
-    ghEl.innerHTML = `${notice}
-      <p><span class="tag fail">no PAT configured</span></p>
-      <p class="muted">${escapeHtml(gh.raw || 'Add a GitHub Personal Access Token per org in the Settings form below.')}</p>
-    `;
-  } else if (!gh.logged_in) {
-    ghEl.innerHTML = `${notice}
-      <p><span class="tag fail">authentication failed</span></p>
-      <p class="muted">${escapeHtml(gh.raw)}</p>
-    `;
-  } else {
-    ghEl.innerHTML = `${notice}
-      <p><span class="tag ok">authenticated</span></p>
-      <pre class="log">${escapeHtml(gh.raw)}</pre>
-      <p class="muted">For SSO-protected orgs, ensure each PAT is authorized for each org in your GitHub settings (Settings → Applications → Authorized OAuth Apps / Personal access tokens).</p>
-    `;
+const KEY_SOURCE_LABEL = {
+  file: 'loaded from github_app_private_key_path',
+  secrets_manager: 'loaded from the lde/github-app secret',
+};
+
+// Fixed reasons the setup callback can redirect back with (?gh_app_error=<reason>).
+const SETUP_ERRORS = {
+  state: 'The setup link was unknown, already used or expired. Start again.',
+  exchange: 'GitHub did not hand over the new app. The code is single-use and expires after an hour: start again.',
+  store: 'LDE could not store the new app\'s private key. Check the server log, then start again.',
+  exists: 'That org already has a GitHub App in LDE, so the new one was not saved. Delete the unused app on GitHub.',
+  config: 'The GitHub App configuration is broken, so the new app was not saved. Fix it (see the card), then delete the unused app on GitHub and start again.',
+};
+
+function createAppHtml() {
+  return `<details id="gh-app-create">
+    <summary>Create a GitHub App for another org</summary>
+    <p class="muted hint">GitHub creates a private, read-only app (Contents and Metadata) owned by the org, with no webhook. LDE stores its private key on the server; the key never reaches this page. Only an owner of the org can create it. Several orgs in one GitHub Enterprise? You can instead add one enterprise-owned app by hand (docs/github-app.md).</p>
+    <p><label>Org (blank = your personal account)<br>
+       <input id="ga-org" type="text" maxlength="39" autocomplete="off" placeholder="my-org"></label></p>
+    <p><label>App name (must be unique on GitHub; blank picks one)<br>
+       <input id="ga-name" type="text" maxlength="34" autocomplete="off" placeholder="LDE my-org"></label></p>
+    <p><button id="ga-create" type="button">Create GitHub App on GitHub</button>
+       <span id="ga-status" class="muted"></span></p>
+  </details>`;
+}
+
+// Start GitHub's manifest flow: LDE returns the manifest, the browser form-posts it to github.com.
+async function createApp(org, name, statusEl) {
+  statusEl.textContent = 'Preparing…';
+  try {
+    const r = await api.ghAppManifest({ org, name });
+    if (typeof r.action !== 'string' || !r.action.startsWith('https://github.com/')) {
+      throw new Error('unexpected setup URL');
+    }
+    // Built with the DOM, not innerHTML: the manifest is posted as an opaque value.
+    const form = document.createElement('form');
+    form.method = 'post';
+    form.action = r.action;
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'manifest';
+    input.value = r.manifest;
+    form.append(input);
+    document.body.append(form);
+    form.submit();
+  } catch (err) {
+    statusEl.textContent = `Failed: ${err.message}`;
   }
 }
 
+function wireCreateApp() {
+  const btn = document.getElementById('ga-create');
+  if (btn) {
+    btn.addEventListener('click', () => createApp(
+      document.getElementById('ga-org').value.trim(),
+      document.getElementById('ga-name').value.trim(),
+      document.getElementById('ga-status')));
+  }
+  for (const el of document.querySelectorAll('.ga-create-org')) {
+    el.addEventListener('click', () => createApp(el.dataset.org, '', el.nextElementSibling));
+  }
+}
+
+function setupResultHtml() {
+  const params = new URLSearchParams(window.location.search);
+  const reason = params.get('gh_app_error');
+  const created = params.get('gh_app') === 'created';
+  const installed = params.get('setup_action') === 'install';
+  if (reason || created || installed) {
+    window.history.replaceState(null, '', window.location.pathname);
+  }
+  if (reason) {
+    return `<p><span class="tag fail">GitHub App setup failed</span> ${escapeHtml(SETUP_ERRORS[reason] || 'Unknown error. Check the server log.')}</p>`;
+  }
+  if (installed) return '<p><span class="tag ok">installed</span> GitHub App installed. LDE picks up a new install within five minutes.</p>';
+  if (created) return '<p><span class="tag ok">created</span> GitHub App created. Install it on its org.</p>';
+  return '';
+}
+
+let setupResult = '';
+
+// install_url is built server-side from a validated slug; check the scheme here too.
+function safeInstallUrl(app) {
+  return (typeof app.install_url === 'string' && app.install_url.startsWith('https://github.com/apps/'))
+    ? app.install_url : '';
+}
+
+function appRowHtml(app) {
+  const tag = app.ok ? '<span class="tag ok">app</span>' : '<span class="tag fail">app</span>';
+  const name = app.name || app.slug || `App ${app.app_id}`;
+  const owner = app.owner ? ` <span class="muted">owned by ${escapeHtml(app.owner)}</span>` : '';
+  const src = KEY_SOURCE_LABEL[app.key_source] ? ` <span class="muted">(key ${KEY_SOURCE_LABEL[app.key_source]})</span>` : '';
+  const url = app.ok ? safeInstallUrl(app) : '';
+  const manage = url ? ` · <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Manage on GitHub</a>` : '';
+  const msg = app.ok ? '' : ` ${escapeHtml(app.message)}`;
+  return `<li>${tag} ${escapeHtml(name)}${owner}${src}${manage}${msg}</li>`;
+}
+
+function renderGhStatusCard(gh) {
+  const ghEl = document.getElementById('gh-status');
+  if (!ghEl) return;
+  const notice = gh.notice ? `<p><span class="tag warn">deprecated config</span> ${escapeHtml(gh.notice)}</p>` : '';
+  if (!gh.installed) {
+    ghEl.innerHTML = `${setupResult}${notice}
+      <p><span class="tag fail">not configured</span> ${escapeHtml(gh.raw || '')}</p>
+      ${createAppHtml().replace('<details id="gh-app-create">', '<details id="gh-app-create" open>').replace('for another org', 'for your org')}
+    `;
+    wireCreateApp();
+    return;
+  }
+  const apps = gh.apps || [];
+  const appsError = gh.apps_error
+    ? `<p><span class="tag fail">GitHub App config</span> ${escapeHtml(gh.apps_error)}</p>` : '';
+  const appList = apps.length
+    ? `<p><strong>GitHub Apps</strong></p><ul class="gh-orgs">${apps.map(appRowHtml).join('')}</ul>`
+    : '<p><span class="tag warn">no GitHub App</span> Using PATs only (deprecated).</p>';
+  const rows = (gh.accounts || []).map((a) => {
+    const label = a.org === '*' ? 'all other orgs (*)' : a.org;
+    const via = a.via === 'app' ? (a.app ? `app: ${a.app}` : 'app') : a.via === 'pat' ? 'PAT' : 'none';
+    const cls = !a.ok ? 'fail' : a.via === 'pat' ? 'warn' : 'ok';
+    // An org without an app gets its own private app through the manifest flow.
+    const create = (a.org !== '*' && a.via !== 'app' && !gh.apps_error)
+      ? ` <button type="button" class="secondary ga-create-org" data-org="${escapeHtml(a.org)}">Create app for ${escapeHtml(a.org)}</button><span class="muted"></span>`
+      : '';
+    return `<li><span class="tag ${cls}">${escapeHtml(via)}</span> ${escapeHtml(label)}${a.user ? ` <span class="muted">as ${escapeHtml(a.user)}</span>` : ''}${create}</li>`;
+  }).join('');
+  const overall = gh.logged_in
+    ? '<span class="tag ok">authenticated</span>'
+    : '<span class="tag fail">authentication incomplete</span>';
+  ghEl.innerHTML = `${setupResult}${notice}
+    <p>${overall}</p>
+    ${appsError}
+    ${appList}
+    ${rows ? `<p><strong>Orgs</strong></p><ul class="gh-orgs">${rows}</ul>` : ''}
+    <pre class="log">${escapeHtml(gh.raw)}</pre>
+    ${gh.apps_error ? '' : createAppHtml()}
+  `;
+  wireCreateApp();
+}
+
 export async function renderSettings(root) {
+  setupResult = setupResultHtml() || setupResult;
   root.innerHTML = `
     <div class="card">
-      <h2>GitHub PAT auth</h2>
+      <h2>GitHub auth</h2>
       <div id="gh-status">Loading…</div>
     </div>
     <div class="card">
@@ -39,7 +158,7 @@ export async function renderSettings(root) {
     </div>
   `;
 
-  // The status card checks every PAT against GitHub, which can be slow:
+  // The status card checks the app and every org against GitHub, which can be slow:
   // load it in the background so it never blocks the form.
   api.ghStatus().then(renderGhStatusCard).catch((err) => {
     const ghEl = document.getElementById('gh-status');
@@ -55,17 +174,21 @@ export async function renderSettings(root) {
     return;
   }
   const formEl = document.getElementById('settings-form');
+  const patCount = Object.keys(settings.github_pats || {}).length;
   formEl.innerHTML = `
-    <div id="pat-section">
-      <p>${LOCK_ICON} GitHub PATs — one fine-grained token per org (masked, write-only)</p>
+    <div id="app-section">
+      <p><button id="test-gh" type="button">Test GitHub Apps</button>
+         <span id="gh-test-status" class="muted"></span>
+         <br><span class="muted hint">Checks every GitHub App and which app or PAT covers each org, and refreshes the card above. Apps are created from the card; an app added by hand goes in <code>github_apps</code> in <code>.settings.json</code> or the <code>lde/github-app</code> secret (docs/github-app.md).</span></p>
+    </div>
+    <details id="pat-section"${patCount ? ' open' : ''}>
+      <summary>Legacy PATs (deprecated, ${patCount} saved)</summary>
+      <p>${LOCK_ICON} Used only for orgs the GitHub App is not installed on — one fine-grained token per org (masked, write-only)</p>
       <div id="pat-rows">${Object.entries(settings.github_pats || {}).map(([org, masked]) => patRowHtml(org, masked)).join('')}</div>
       <p><button id="pat-add" type="button" class="secondary">Add org</button>
          <button id="pat-add-all" type="button" class="secondary">Add token for all other orgs</button>
-         <span class="muted hint">The <code>*</code> row is used for any org without its own row (for example a classic PAT that spans orgs); an org with neither is an error. Leave a saved row's token blank to keep it; type to replace it.</span></p>
-      <p><button id="test-ghpat" type="button">Test PAT</button>
-         <span id="ghpat-status" class="muted"></span>
-         <br><span class="muted hint">Tests every saved PAT against GitHub and refreshes the card above — Save first if you just changed one.</span></p>
-    </div>
+         <span class="muted hint">The <code>*</code> row is used for any org without its own row and without the GitHub App. Leave a saved row's token blank to keep it; type to replace it.</span></p>
+    </details>
     <p><label>Default orgs (comma separated)<br>
        <input id="s-orgs" type="text" value="${(settings.default_orgs || []).join(',')}"></label></p>
     <p><label>Dependency-Track API URL (used for API calls)<br>
@@ -128,8 +251,8 @@ export async function renderSettings(root) {
     }
   });
 
-  document.getElementById('test-ghpat').addEventListener('click', async () => {
-    const status = document.getElementById('ghpat-status');
+  document.getElementById('test-gh').addEventListener('click', async () => {
+    const status = document.getElementById('gh-test-status');
     status.innerHTML = 'Testing…';
     try {
       const r = await api.ghStatus();

@@ -21,6 +21,7 @@ export const api = {
   getSettings: () => request('GET', '/api/settings'),
   putSettings: (patch) => request('PUT', '/api/settings', patch),
   ghStatus: () => request('GET', '/api/gh-status'),
+  ghAppManifest: (opts) => request('POST', '/api/gh-app/manifest', opts),
   dtrackStatus: () => request('GET', '/api/dtrack-status'),
   geminiStatus: () => request('GET', '/api/gemini-status'),
 
