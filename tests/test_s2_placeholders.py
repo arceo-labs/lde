@@ -15,21 +15,21 @@ from backend import gh_auth  # noqa: E402
 
 AWS_SETTINGS_503 = (
     'Settings cannot be changed through the UI on this deployment. '
-    'Write lde/github-app, lde/dtrack-api-key, and lde/gemini-api-key in AWS Secrets Manager '
+    'Write lde/dtrack-api-key and lde/gemini-api-key in AWS Secrets Manager '
     '(docs/aws-deployment.md ## Step 4 — Populate secrets). '
-    'LDE reads Secrets Manager within a minute.'
+    'LDE reads Secrets Manager within a minute. GitHub orgs are changed in '
+    'Settings -> GitHub auth.'
 )
 
 
 class GhAuthTests(unittest.TestCase):
     def test_empty_map_is_not_installed_on_aws(self):
-        with patch('backend.gh_auth.settings_mod.load_settings',
-                   return_value={'github_pats': {}}), \
+        with patch('backend.settings.load_settings', return_value={'github_pats': {}}), \
              patch.dict(os.environ, {'LDE_SECRETS_SOURCE': 'aws'}):
             status = gh_auth.auth_status()
         self.assertFalse(status['installed'])
         self.assertFalse(status['logged_in'])
-        self.assertIn('lde/github-app', status['raw'])
+        self.assertIn('lde/github secret', status['raw'])
         self.assertEqual(status['mode'], 'none')
 
     def test_token_401_keeps_existing_sentence(self):
@@ -37,7 +37,7 @@ class GhAuthTests(unittest.TestCase):
             'https://api.github.com/user', 401, 'Unauthorized',
             hdrs={}, fp=BytesIO(b''),
         )
-        with patch('backend.gh_auth.settings_mod.load_settings',
+        with patch('backend.settings.load_settings',
                    return_value={'github_pats': {'acme': 'github_pat_deadbeef'}}), \
              patch('backend.gh_auth.urllib.request.urlopen', side_effect=err):
             status = gh_auth.auth_status()

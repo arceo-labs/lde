@@ -1,15 +1,16 @@
 """GitHub API client using urllib.request.
 
-Credentials are chosen per org at call time by `_credential()`:
+Each org's credential comes from its entry in the GitHub org map
+(`backend/gh_config.py`), read at call time so a change applies without a
+restart:
 
-1. a GitHub App installation token (`backend/gh_app.py`) when an app is
-   configured and installed on the org;
-2. otherwise the org's deprecated PAT from ``github_pats`` (or its ``"*"``
-   entry).
+- ``auth: app`` / ``enterprise``: an installation token of the org's own app or
+  of the enterprise app (`backend/gh_app.py`);
+- ``auth: pat``: the org's fine-grained PAT (deprecated).
 
-An org with neither is an error, never an unauthenticated request. Settings
-are read at call time so the AWS Secrets Manager overlay applies without a
-restart.
+There is no fallback between kinds and no catch-all token. An org that is not
+in the map, has ``auth: none``, or whose credential fails is an error, never an
+unauthenticated request.
 
 All requests target https://api.github.com only — no user-supplied base URL
 is accepted, eliminating SSRF risk from the GitHub layer.
@@ -22,9 +23,8 @@ import urllib.error
 import urllib.request
 from urllib.parse import quote, urlencode
 
-from . import gh_app
+from . import gh_app, gh_config
 from . import log as log_mod
-from . import settings as settings_mod
 
 logger = log_mod.get('gh')
 
@@ -80,40 +80,40 @@ _pat_warned = set()
 def _credential(org):
     """Return ``(token, source)`` for *org*; *source* is ``'app'`` or ``'pat'``.
 
-    A GitHub App installed on *org* wins: the app owned by *org* first, then any
-    other configured app. Otherwise the org's own PAT, then the ``"*"`` PAT, is
-    used (deprecated). Raises GhError when none applies, or when an app is
-    configured but broken: a broken app setup fails closed instead of quietly
-    falling back to a PAT.
+    Raises GhError when the org is not set up, does not authenticate, or its
+    app cannot mint a token. A broken org map fails every org closed.
     """
-    cfg = settings_mod.load_settings()
-    key = (org or '').lower()
     try:
-        apps = gh_app.app_configs(cfg)
-        if apps:
-            token, _ = gh_app.token_for(apps, key)
-            if token:
-                return token, 'app'
+        conf = gh_config.load()
+    except gh_config.ConfigError as exc:
+        raise GhError(f'GitHub config is broken: {exc}') from None
+    key = (org or '').lower()
+    entry = conf['orgs'].get(key)
+    if entry is None:
+        raise GhError(f'Org {org!r} is not set up in LDE. Add it in Settings and create a '
+                      'GitHub App for it (docs/github-app.md).')
+    auth = entry['auth']
+    if auth == 'pat':
+        if key not in _pat_warned:
+            _pat_warned.add(key)
+            logger.warning('org %s is using a GitHub PAT; PATs are deprecated, create a GitHub '
+                           'App for it in Settings instead', key)
+        return entry['token'], 'pat'
+    if auth == 'none':
+        raise GhError(f'Org {org!r} has no GitHub credential yet. In Settings, click '
+                      f'"Create app for {key}" (docs/github-app.md).')
+    which = 'the enterprise app' if auth == 'enterprise' else 'its GitHub App'
+    try:
+        token = gh_app.installation_token(gh_config.app_for(conf, key), key)
     except gh_app.AppConfigError as exc:
-        raise GhError(f'GitHub App is misconfigured: {exc}') from None
+        raise GhError(f'GitHub App for org {org!r} is misconfigured: {exc}') from None
     except gh_app.AppAuthError as exc:
         raise GhError(f'GitHub App authentication failed for org {org!r}: {exc}',
                       status=exc.status) from None
-
-    pats = settings_mod.github_tokens(cfg)
-    token = pats.get(key) or pats.get('*')
-    if token:
-        if key not in _pat_warned:
-            _pat_warned.add(key)
-            logger.warning('org %s is using a GitHub PAT; PATs are deprecated, install the '
-                           'GitHub App on it instead', key)
-        return token, 'pat'
-    if apps:
-        raise GhError(f'No GitHub App is installed on org {org!r}. In Settings, click '
-                      f'"Create app for {key}", or install an existing app on it '
-                      f'(docs/github-app.md).')
-    raise GhError(f'No GitHub credentials for org {org!r}. Configure the GitHub App '
-                  f'(docs/github-app.md), or add a PAT for it in Settings.')
+    if not token:
+        raise GhError(f'Org {org!r} is set to use {which}, but it is not installed there. '
+                      'Install it from Settings ("Manage on GitHub").')
+    return token, 'app'
 
 
 def _get_token(org):
@@ -140,35 +140,28 @@ def _authed(org, call):
 
 
 def orgs_without_credentials(orgs):
-    """Return the orgs in *orgs* that no GitHub App and no PAT covers.
+    """Return ``[(org, reason)]`` for the orgs in *orgs* LDE cannot authenticate to.
 
-    Raises GhError when the app is configured but broken, or GitHub cannot be
-    reached to check an installation.
+    Checks each org the way a scan would: not in the map, ``auth: none``, an
+    app not installed there or failing. Talks to GitHub for app orgs.
     """
-    cfg = settings_mod.load_settings()
-    pats = settings_mod.github_tokens(cfg)
     try:
-        apps = gh_app.app_configs(cfg)
-    except gh_app.AppConfigError as exc:
-        raise GhError(f'GitHub App is misconfigured: {exc}') from None
+        gh_config.load()
+    except gh_config.ConfigError as exc:
+        raise GhError(f'GitHub config is broken: {exc}') from None  # once, not per org
     seen, missing = set(), []
     for org in orgs:
         key = org.lower() if isinstance(org, str) else ''
         if key in seen:
             continue
         seen.add(key)
-        if key in pats or '*' in pats:
+        if not isinstance(org, str) or not _ID_RE.match(org):
+            missing.append((repr(org)[:80], f'{repr(org)[:80]} is not a GitHub org name.'))
             continue
-        if apps and gh_app._OWNER_RE.match(key):
-            try:
-                if gh_app.token_for(apps, key)[0]:
-                    continue
-            except gh_app.AppConfigError as exc:
-                raise GhError(f'GitHub App is misconfigured: {exc}') from None
-            except gh_app.AppAuthError as exc:
-                raise GhError(f'GitHub App authentication failed for org {org!r}: {exc}',
-                              status=exc.status) from None
-        missing.append(org if isinstance(org, str) else repr(org))
+        try:
+            _credential(org)
+        except GhError as exc:
+            missing.append((org, str(exc)))
     return missing
 
 

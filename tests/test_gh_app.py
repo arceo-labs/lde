@@ -1,4 +1,4 @@
-"""GitHub App auth: config loading, JWT signing, installation tokens, fallback to PATs."""
+"""GitHub App auth: key loading, JWT signing, installation tokens, per-org credentials, status."""
 
 import base64
 import io
@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import gh_app, gh_auth, github_client, secrets_loader, settings as settings_mod  # noqa: E402
+from backend import gh_app, gh_auth, gh_config, github_client, secrets_loader, settings as settings_mod  # noqa: E402
 
 FAKE_PEM = '-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n'
 
@@ -56,29 +56,14 @@ def _token_doc(token='ghs_inst', minutes=60):
 APP = {'app_id': '123', 'pem': FAKE_PEM.encode(), 'source': 'secrets_manager'}
 
 
-# ---- app_config -------------------------------------------------------------
+# ---- key loading -------------------------------------------------------------
 
-def test_no_app_settings_means_no_app():
-    assert gh_app.app_config({}) is None
-    assert gh_app.app_config({'github_app_id': '', 'github_app_private_key_path': ''}) is None
-
-
-@pytest.mark.parametrize('cfg,needle', [
-    ({'github_app_id': '123'}, 'no private key'),
-    ({'github_app_private_key': FAKE_PEM}, 'github_app_id is not'),
-    ({'github_app_id': 'my-app', 'github_app_private_key': FAKE_PEM}, 'numeric App ID'),
-])
-def test_partial_app_config_fails_closed(cfg, needle):
-    with pytest.raises(gh_app.AppConfigError, match=needle):
-        gh_app.app_config(cfg)
+def _path_app(path):
+    return gh_config.load_app({'app_id': '9', 'private_key_path': str(path)})
 
 
-def test_secrets_manager_key_wins_over_file(tmp_path):
-    f = tmp_path / 'k.pem'
-    f.write_text('file-key')
-    f.chmod(0o600)
-    out = gh_app.app_config({'github_app_id': 123, 'github_app_private_key': FAKE_PEM,
-                             'github_app_private_key_path': str(f)})
+def test_inline_key_is_used_as_is():
+    out = gh_config.load_app({'app_id': '123', 'private_key': FAKE_PEM})
     assert out == {'app_id': '123', 'pem': FAKE_PEM.encode(), 'source': 'secrets_manager'}
 
 
@@ -88,7 +73,7 @@ def test_key_file_is_read_through_symlink(tmp_path):
     f.chmod(0o600)
     link = tmp_path / 'link.pem'
     link.symlink_to(f)
-    out = gh_app.app_config({'github_app_id': '9', 'github_app_private_key_path': str(link)})
+    out = _path_app(link)
     assert out['pem'] == FAKE_PEM.encode() and out['source'] == 'file'
 
 
@@ -98,16 +83,16 @@ def test_key_file_readable_by_others_is_refused(tmp_path, mode):
     f.write_text(FAKE_PEM)
     f.chmod(mode)
     with pytest.raises(gh_app.AppConfigError, match='chmod 600'):
-        gh_app.app_config({'github_app_id': '9', 'github_app_private_key_path': str(f)})
+        _path_app(f)
 
 
 def test_key_file_errors_do_not_name_the_path(tmp_path):
     missing = str(tmp_path / 'secret-dir' / 'nope.pem')
     with pytest.raises(gh_app.AppConfigError) as exc:
-        gh_app.app_config({'github_app_id': '9', 'github_app_private_key_path': missing})
+        _path_app(missing)
     assert 'secret-dir' not in str(exc.value)
     with pytest.raises(gh_app.AppConfigError, match='regular file'):
-        gh_app.app_config({'github_app_id': '9', 'github_app_private_key_path': str(tmp_path)})
+        _path_app(tmp_path)
 
 
 # ---- JWT --------------------------------------------------------------------
@@ -265,29 +250,62 @@ def _cfg(**kw):
     return patch.object(settings_mod, 'load_settings', return_value=kw)
 
 
-APP_CFG = {'github_app_id': '123', 'github_app_private_key': FAKE_PEM}
+def _app(app_id='123', scan=True):
+    return {'auth': 'app', 'scan': scan, 'app_id': app_id, 'private_key': FAKE_PEM}
 
 
-def test_app_token_wins_over_pat(fake_github):
-    fake_github.routes[('GET', '/orgs/acme/installation')] = {'id': 7}
-    fake_github.routes[('POST', '/app/installations/7/access_tokens')] = _token_doc()
-    with _cfg(**APP_CFG, github_pats={'acme': 'github_pat_x'}):
+ENTERPRISE = {'enterprise': 'my-ent', 'app_id': '555', 'private_key': FAKE_PEM}
+
+
+def _secret(**orgs):
+    """The map as the lde/github secret holds it (inline keys)."""
+    return _cfg(github_secret={'orgs': orgs, 'enterprise_app': ENTERPRISE})
+
+
+def _install(fake_github, org, inst_id=7, token='ghs_inst'):
+    fake_github.routes[('GET', f'/orgs/{org}/installation')] = {'id': inst_id}
+    fake_github.routes[('POST', f'/app/installations/{inst_id}/access_tokens')] = _token_doc(token)
+
+
+def test_org_with_app_gets_an_installation_token(fake_github):
+    _install(fake_github, 'acme')
+    with _secret(acme=_app()):
         assert github_client._credential('acme') == ('ghs_inst', 'app')
+    assert fake_github.calls[0][1] == '/orgs/acme/installation'
 
 
-def test_org_without_install_falls_back_to_pat(fake_github):
-    with _cfg(**APP_CFG, github_pats={'*': 'ghp_any'}):
-        assert github_client._credential('other') == ('ghp_any', 'pat')
+def test_app_not_installed_does_not_fall_back(fake_github):
+    with _secret(acme=_app()), pytest.raises(github_client.GhError, match='not installed'):
+        github_client._credential('acme')
 
 
-def test_org_without_install_or_pat_fails_closed(fake_github):
-    with _cfg(**APP_CFG, github_pats={}), \
-            pytest.raises(github_client.GhError, match='No GitHub App is installed on org'):
-        github_client._credential('other')
+def test_only_the_orgs_own_app_is_tried(fake_github):
+    _install(fake_github, 'globex', 9, 'ghs_g')
+    with _secret(acme=_app('1'), globex=_app('2')):
+        assert github_client._credential('globex') == ('ghs_g', 'app')
+    with patch.object(gh_app, 'installation_token', return_value=None) as tok, \
+            _secret(acme=_app('1'), globex=_app('2')), pytest.raises(github_client.GhError):
+        github_client._credential('acme')
+    assert [c.args[0]['app_id'] for c in tok.call_args_list] == ['1']
 
 
-def test_broken_app_config_does_not_fall_back_to_pat():
-    with _cfg(github_app_id='123', github_pats={'acme': 'github_pat_x'}), \
+def test_enterprise_org_uses_the_enterprise_app(fake_github):
+    _install(fake_github, 'initech', 11, 'ghs_e')
+    seen = []
+    real = gh_app.installation_token
+
+    def spy(app, owner):
+        seen.append(app['app_id'])
+        return real(app, owner)
+    with _secret(initech={'auth': 'enterprise', 'scan': True}), \
+            patch.object(gh_app, 'installation_token', spy):
+        assert github_client._credential('initech') == ('ghs_e', 'app')
+    assert seen == ['555']
+
+
+def test_broken_key_fails_closed(fake_github):
+    with _cfg(github={'orgs': {'acme': {'auth': 'app', 'app_id': '1',
+                                        'private_key_path': '/nonexistent/k.pem'}}}), \
             pytest.raises(github_client.GhError, match='misconfigured'):
         github_client._credential('acme')
 
@@ -305,7 +323,7 @@ def test_app_401_retries_once_with_a_fresh_token(fake_github):
             raise github_client.GhError('GitHub API 401', status=401)
         return 'ok'
 
-    with _cfg(**APP_CFG):
+    with _secret(acme=_app()):
         assert github_client._authed('acme', call) == 'ok'
     assert seen == ['first', 'second']
 
@@ -317,97 +335,109 @@ def test_pat_401_is_not_retried():
         seen.append(tok)
         raise github_client.GhError('GitHub API 401', status=401)
 
-    with _cfg(github_pats={'acme': 'github_pat_x'}), pytest.raises(github_client.GhError):
+    with _secret(acme={'auth': 'pat', 'token': 'github_pat_x'}), \
+            pytest.raises(github_client.GhError):
         github_client._authed('acme', call)
     assert seen == ['github_pat_x']
 
 
 def test_orgs_without_credentials_checks_installations(fake_github):
-    fake_github.routes[('GET', '/orgs/acme/installation')] = {'id': 7}
-    fake_github.routes[('POST', '/app/installations/7/access_tokens')] = _token_doc()
-    with _cfg(**APP_CFG, github_pats={'globex': 'github_pat_x'}):
-        assert github_client.orgs_without_credentials(['acme', 'globex', 'initech']) == ['initech']
+    _install(fake_github, 'acme')
+    with _secret(acme=_app(), globex={'auth': 'pat', 'token': 'github_pat_x'},
+                 initech=_app('9')):
+        missing = github_client.orgs_without_credentials(['acme', 'globex', 'initech'])
+    assert [o for o, _ in missing] == ['initech']
 
 
 # ---- gh-status ------------------------------------------------------------------
 
-def test_auth_status_reports_app_and_pat_fallback(fake_github):
+def test_auth_status_reports_each_org(fake_github):
     fake_github.routes[('GET', '/app')] = {'slug': 'lde-reader', 'name': 'LDE Reader'}
-    fake_github.routes[('GET', '/orgs/acme/installation')] = {'id': 7}
-    fake_github.routes[('POST', '/app/installations/7/access_tokens')] = _token_doc()
+    _install(fake_github, 'acme')
+    _install(fake_github, 'initech', 11, 'ghs_e')
     monkey_ok = {'ok': True, 'user': 'octocat', 'message': 'Authenticated as octocat'}
-    with _cfg(**APP_CFG, default_orgs=['acme', 'globex'], github_pats={'globex': 'github_pat_x'}), \
+    with _secret(acme=_app(), globex={'auth': 'pat', 'token': 'github_pat_secret'},
+                 initech={'auth': 'enterprise', 'scan': False},
+                 hooli={'auth': 'none', 'scan': False}), \
             patch.object(gh_auth, 'check_token', return_value=monkey_ok):
         st = gh_auth.auth_status()
     assert st['mode'] == 'mixed' and st['installed'] and st['logged_in']
-    [app] = st['apps']
-    assert app['ok'] and app['slug'] == 'lde-reader' and app['key_source'] == 'secrets_manager'
-    by_org = {a['org']: a for a in st['accounts']}
-    assert by_org['acme']['via'] == 'app' and by_org['acme']['user'] == 'lde-reader[bot]'
-    assert by_org['acme']['app'] == 'lde-reader'
-    assert by_org['globex']['via'] == 'pat'
+    assert st['source'] == 'secret' and st['config_error'] == ''
+    assert st['enterprise_app']['ok'] and st['enterprise_app']['enterprise'] == 'my-ent'
+    by_org = {o['org']: o for o in st['orgs']}
+    assert list(by_org) == ['acme', 'globex', 'hooli', 'initech']
+    assert by_org['acme']['ok'] and by_org['acme']['user'] == 'lde-reader[bot]'
+    assert by_org['acme']['install_url'] == 'https://github.com/apps/lde-reader/installations/new'
+    assert by_org['globex']['auth'] == 'pat' and by_org['globex']['token_hint'] == 'gith…'
+    assert by_org['initech']['ok'] and not by_org['initech']['scan']
+    assert not by_org['hooli']['ok']
     assert 'deprecated' in st['notice'] and 'globex' in st['notice']
-    assert 'ghs_inst' not in json.dumps(st) and 'not-a-real-key' not in json.dumps(st)
+    dumped = json.dumps(st)
+    for secret in ('ghs_inst', 'ghs_e', 'not-a-real-key', 'github_pat_secret'):
+        assert secret not in dumped
 
 
 def test_auth_status_flags_uninstalled_org(fake_github):
     fake_github.routes[('GET', '/app')] = {'slug': 'lde-reader', 'name': 'LDE Reader'}
-    with _cfg(**APP_CFG, default_orgs=['initech'], github_pats={}):
+    with _secret(initech=_app()):
         st = gh_auth.auth_status()
     assert st['mode'] == 'app' and not st['logged_in']
-    assert st['accounts'] == [{'host': 'github.com', 'org': 'initech', 'user': '', 'ok': False,
-                               'via': '', 'app': ''}]
+    [org] = st['orgs']
+    assert org['org'] == 'initech' and not org['ok'] and 'not installed' in org['message']
+
+
+def test_org_with_none_and_scan_off_does_not_fail_the_login(fake_github):
+    _install(fake_github, 'acme')
+    fake_github.routes[('GET', '/app')] = {'slug': 'lde-reader', 'name': 'LDE Reader'}
+    with _secret(acme=_app(), later={'auth': 'none', 'scan': False}):
+        assert gh_auth.auth_status()['logged_in']
+    with _secret(acme=_app(), later={'auth': 'none', 'scan': True}):
+        assert not gh_auth.auth_status()['logged_in']
 
 
 def test_auth_status_reports_broken_config_without_raising():
-    with _cfg(github_app_id='123', default_orgs=['acme']):
+    with _cfg(github={'orgs': {'acme': {'auth': 'pat'}}}):
         st = gh_auth.auth_status()
-    assert st['installed'] and not st['logged_in'] and st['apps'] == []
-    assert 'no private key' in st['apps_error']
-    assert st['accounts'][0]['org'] == 'acme' and not st['accounts'][0]['ok']
+    assert st['installed'] and not st['logged_in'] and st['orgs'] == []
+    assert 'needs a token' in st['config_error']
+
+
+def test_auth_status_with_nothing_configured():
+    with _cfg():
+        st = gh_auth.auth_status()
+    assert not st['installed'] and st['source'] == 'none' and 'Create app for' in st['raw']
 
 
 # ---- settings and secrets ----------------------------------------------------
 
-def test_masked_drops_private_key_and_path():
-    out = settings_mod.masked({'github_app_id': '123', 'github_app_private_key': FAKE_PEM,
-                               'github_app_private_key_path': '/home/x/k.pem'})
-    assert out == {'github_app_id': '123'}
+def test_masked_drops_the_org_map_and_its_secret_copy():
+    out = settings_mod.masked({'github': {'orgs': {'a': {'auth': 'app', 'app_id': '1',
+                                                         'private_key_path': '/k'}}},
+                               'github_secret': {'orgs': {}}, 'github_secret_error': 'x', 'x': 1})
+    assert out == {'x': 1}
 
 
-def test_save_never_persists_secret_manager_key(tmp_path):
+def test_save_never_persists_secret_manager_values(tmp_path):
     f = tmp_path / 's.json'
     f.write_text('{}')
     real_load = settings_mod.load_settings
 
     def load_with_overlay():
         cfg = real_load()
-        cfg['github_app_private_key'] = FAKE_PEM
+        cfg['github_secret'] = {'orgs': {'a': {'auth': 'app', 'app_id': '1',
+                                               'private_key': FAKE_PEM}}}
         return cfg
 
     with patch.object(settings_mod, 'SETTINGS_PATH', str(f)), \
             patch.object(settings_mod, 'load_settings', load_with_overlay):
-        settings_mod.save_settings({'github_app_id': '42'})
+        settings_mod.save_settings({'dtrack_url': 'u'})
     stored = json.loads(f.read_text())
-    assert stored['github_app_id'] == '42'
-    assert 'github_app_private_key' not in stored
+    assert 'github_secret' not in stored and 'not-a-real-key' not in f.read_text()
 
 
-@pytest.mark.parametrize('bad', ['abc', '12a', True, ['1'], 1.5])
-def test_app_id_is_validated_on_save(tmp_path, bad):
-    with patch.object(settings_mod, 'SETTINGS_PATH', str(tmp_path / 's.json')), \
-            pytest.raises(ValueError):
-        settings_mod.save_settings({'github_app_id': bad})
-
-
-def test_private_key_settings_are_not_api_writable():
-    assert 'github_app_private_key_path' not in settings_mod.API_WRITABLE_KEYS
-    assert 'github_app_private_key' not in settings_mod.API_WRITABLE_KEYS
-    assert 'github_app_id' in settings_mod.API_WRITABLE_KEYS
-
-
-@pytest.mark.parametrize('key', ['github_app_private_key_path', 'github_app_private_key'])
-def test_put_settings_rejects_private_key_fields(key, monkeypatch):
+@pytest.mark.parametrize('key', ['github', 'github_pats', 'default_orgs', 'github_secret',
+                                 'github_app_private_key_path', 'github_app_id'])
+def test_put_settings_rejects_github_and_key_fields(key, monkeypatch):
     import server
     monkeypatch.delenv('LDE_SECRETS_SOURCE', raising=False)
     handler = MagicMock()
@@ -417,91 +447,38 @@ def test_put_settings_rejects_private_key_fields(key, monkeypatch):
     save.assert_not_called()
 
 
-def test_secret_overlay_parses_app_secret():
-    assert secrets_loader._parse_app(json.dumps({'app_id': 123, 'private_key': FAKE_PEM})) == {
-        'github_app_id': '123', 'github_app_private_key': FAKE_PEM}
-    assert secrets_loader._parse_app('REPLACE_ME') == {}
-    assert secrets_loader._parse_app('{"app_id": "x", "private_key": "k"}') == {}
-    assert secrets_loader._parse_app('not json') == {}
-    assert secrets_loader._parse_app('{"app_id": true, "private_key": "-----BEGIN"}') == {}
+def test_secret_overlay_parses_github_map():
+    assert secrets_loader._parse_github('REPLACE_ME') == {}
+    assert secrets_loader._parse_github(None) == {}
+    assert secrets_loader._parse_github('{"orgs": {}}') == {'github_secret': {'orgs': {}}}
+    assert 'github_secret_error' in secrets_loader._parse_github('[1]')
+    assert 'github_secret_error' in secrets_loader._parse_github('not json')
+
+
+def test_unreadable_github_secret_fails_closed(monkeypatch):
+    monkeypatch.setattr(secrets_loader, '_ENABLED', True)
+
+    def fetch(name):
+        if name == 'lde/github':
+            raise OSError('timed out')
+        return 'REPLACE_ME' if name != 'lde/github-pat' else '{"acme": "github_pat_x"}'
+    monkeypatch.setattr(secrets_loader, '_cached_fetch', fetch)
+    cfg = secrets_loader.overlay({})
+    assert 'github_secret_error' in cfg
+    with patch.object(settings_mod, 'load_settings', return_value=cfg), \
+            pytest.raises(github_client.GhError, match='Could not read the lde/github secret'):
+        github_client._credential('acme')
 
 
 def test_pat_placeholder_secret_is_quietly_empty():
     assert secrets_loader._parse_pats('REPLACE_ME') == {}
 
 
-# ---- several apps -------------------------------------------------------------
-
-def _apps_cfg(*entries):
-    return {'github_apps_secret': [{'owner': o, 'app_id': i, 'private_key': FAKE_PEM}
-                                   for o, i in entries]}
-
-
-@pytest.mark.parametrize('cfg,needle', [
-    (_apps_cfg(('acme', '1'), ('globex', '1')), 'more than once'),
-    (_apps_cfg(('acme', '1'), ('ACME', '2')), 'same owner'),
-    ({'github_apps_secret': [{'owner': 'a', 'app_id': 'x', 'private_key': FAKE_PEM}]}, 'numeric'),
-    ({'github_apps_secret': [{'owner': '../a', 'app_id': '1', 'private_key': FAKE_PEM}]}, 'owner'),
-    ({'github_apps_secret': [{'owner': 'a', 'app_id': '1'}]}, 'private_key'),
-    ({'github_apps_secret': 'nope'}, 'list'),
-    ({'github_apps': [{'owner': 'a', 'app_id': '1', 'private_key_path': '/nonexistent'}]}, 'cannot be opened'),
-])
-def test_bad_app_lists_fail_closed(cfg, needle):
-    with pytest.raises(gh_app.AppConfigError, match=needle):
-        gh_app.app_configs(cfg)
-
-
-def test_owner_app_is_tried_first(fake_github):
-    tried = []
-
-    def fake_token(app, owner):
-        tried.append(app['app_id'])
-        return f'tok-{app["app_id"]}' if app['app_id'] == '2' else None
-    with patch.object(gh_app, 'installation_token', fake_token):
-        token, app = gh_app.token_for(gh_app.app_configs(_apps_cfg(('acme', '1'), ('globex', '2'))),
-                                      'globex')
-    assert token == 'tok-2' and app['owner'] == 'globex' and tried == ['2']
-
-
-def test_other_apps_are_tried_when_owner_has_none(fake_github):
-    tried = []
-
-    def fake_token(app, owner):
-        tried.append(app['app_id'])
-        return 'tok-ent' if app['app_id'] == '3' else None
-    apps = gh_app.app_configs(_apps_cfg(('acme', '1'), ('my-enterprise', '3')))
-    with patch.object(gh_app, 'installation_token', fake_token):
-        assert gh_app.token_for(apps, 'initech')[0] == 'tok-ent'
-    assert tried == ['1', '3']
-
-
 def test_caches_are_per_app(fake_github):
-    fake_github.routes[('GET', '/orgs/acme/installation')] = {'id': 7}
-    fake_github.routes[('POST', '/app/installations/7/access_tokens')] = _token_doc('ghs_a')
-    a1, a2 = gh_app.app_configs(_apps_cfg(('acme', '1'), ('globex', '2')))
+    _install(fake_github, 'acme', 7, 'ghs_a')
+    a1 = gh_config.load_app({'app_id': '1', 'private_key': FAKE_PEM})
+    a2 = gh_config.load_app({'app_id': '2', 'private_key': FAKE_PEM})
     assert gh_app.installation_token(a1, 'acme') == 'ghs_a'
     fake_github.routes[('POST', '/app/installations/7/access_tokens')] = _token_doc('ghs_b')
     assert gh_app.installation_token(a2, 'acme') == 'ghs_b'   # not app 1's cached token
     assert gh_app.installation_token(a1, 'acme') == 'ghs_a'
-
-
-def test_credential_uses_the_orgs_own_app(fake_github):
-    fake_github.routes[('GET', '/orgs/globex/installation')] = {'id': 9}
-    fake_github.routes[('POST', '/app/installations/9/access_tokens')] = _token_doc('ghs_g')
-    with _cfg(**_apps_cfg(('acme', '1'), ('globex', '2'))):
-        assert github_client._credential('globex') == ('ghs_g', 'app')
-    assert fake_github.calls[0][1] == '/orgs/globex/installation'
-
-
-def test_secret_overlay_parses_app_list():
-    raw = json.dumps({'apps': [{'owner': 'acme', 'app_id': 12, 'private_key': FAKE_PEM}]})
-    assert secrets_loader._parse_app(raw) == {'github_apps_secret': [
-        {'owner': 'acme', 'app_id': '12', 'private_key': FAKE_PEM}]}
-    assert secrets_loader._parse_app(json.dumps({'apps': [{'app_id': 'x'}]})) == {}
-
-
-def test_github_apps_is_file_only_and_hidden():
-    assert 'github_apps' not in settings_mod.API_WRITABLE_KEYS
-    out = settings_mod.masked({'github_apps': [{'private_key_path': '/k'}],
-                               'github_apps_secret': [{'private_key': FAKE_PEM}], 'x': 1})
-    assert out == {'x': 1}

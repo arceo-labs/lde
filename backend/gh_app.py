@@ -1,10 +1,7 @@
 """GitHub App authentication: app JWT -> per-org installation access tokens.
 
-LDE can hold several GitHub Apps, typically one private app per org it scans
-(each app owned by, and installed on, its own org), and optionally an
-enterprise-owned or public app installed on many orgs. For each org this module
-picks the app owned by that org first, then any other configured app that is
-installed there, and:
+``gh_config`` decides which app an org uses (its own app, or the enterprise
+app). For that app and org this module:
 
 1. signs a short-lived app JWT (RS256) with the app's private key,
 2. looks up the app's installation on the org (``GET /orgs/{org}/installation``),
@@ -12,13 +9,7 @@ installed there, and:
    ``metadata:read`` (``POST /app/installations/{id}/access_tokens``),
 4. caches that token in memory until five minutes before it expires.
 
-Apps come from (see ``app_configs``):
-
-- ``github_apps`` in ``.settings.json``: ``[{"owner", "app_id", "private_key_path"}]``;
-- ``github_apps_secret``, overlaid from the ``lde/github-app`` secret in AWS:
-  ``[{"owner", "app_id", "private_key"}]``;
-- the single-app keys ``github_app_id`` with ``github_app_private_key`` or
-  ``github_app_private_key_path`` (owner unknown: tried on every org).
+An app here is ``{'app_id', 'pem', 'source'}`` (``gh_config.load_app``).
 
 Private keys are never accepted over the HTTP API, never returned, never logged.
 Only ``gh_app_setup`` writes them, server-side, when the user creates an app.
@@ -68,7 +59,6 @@ _NOT_INSTALLED_TTL = 300
 # Installation tokens never carry more than this, whatever the app is granted.
 TOKEN_PERMISSIONS = {'contents': 'read', 'metadata': 'read'}
 
-_APP_ID_RE = re.compile(r'^[0-9]{1,20}$')
 _OWNER_RE = re.compile(r'^[A-Za-z0-9._-]+$')
 
 
@@ -94,17 +84,17 @@ def _read_key_file(path):
     see the same file.
     """
     if not isinstance(path, str) or not path.strip():
-        raise AppConfigError('github_app_private_key_path is empty.')
+        raise AppConfigError('private_key_path is empty.')
     real = os.path.realpath(os.path.expanduser(path.strip()))
     try:
         fd = os.open(real, os.O_RDONLY)
     except OSError:
-        raise AppConfigError('The GitHub App private key file named by '
-                             'github_app_private_key_path cannot be opened.') from None
+        raise AppConfigError('The GitHub App private key file named by private_key_path '
+                             'cannot be opened.') from None
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
-            raise AppConfigError('github_app_private_key_path must name a regular file.')
+            raise AppConfigError('private_key_path must name a regular file.')
         if st.st_mode & 0o077:
             raise AppConfigError('The GitHub App private key file is readable by other users. '
                                  'Run chmod 600 on it.')
@@ -118,96 +108,7 @@ def _read_key_file(path):
             os.close(fd)
 
 
-def app_config(cfg):
-    """Return ``{'app_id', 'pem', 'source'}`` from settings *cfg*, or None.
-
-    None means no GitHub App is configured at all (PAT-only setups). A partial
-    or malformed configuration raises AppConfigError: it never silently falls
-    back to PATs, so a broken app setup is noticed.
-
-    A key from Secrets Manager (``github_app_private_key``) wins over a local
-    key file (``github_app_private_key_path``).
-    """
-    app_id = cfg.get('github_app_id')
-    app_id = str(app_id).strip() if app_id not in (None, '') else ''
-    key_inline = cfg.get('github_app_private_key')
-    key_inline = key_inline if isinstance(key_inline, str) and key_inline.strip() else ''
-    key_path = cfg.get('github_app_private_key_path')
-    key_path = key_path if isinstance(key_path, str) and key_path.strip() else ''
-
-    if not app_id and not key_inline and not key_path:
-        return None
-    if not app_id:
-        raise AppConfigError('A GitHub App private key is configured but github_app_id is not.')
-    if not _APP_ID_RE.match(app_id):
-        raise AppConfigError('github_app_id must be the numeric App ID shown on the app\'s '
-                             'GitHub settings page.')
-    if key_inline:
-        return {'app_id': app_id, 'pem': key_inline.encode('utf-8'), 'source': 'secrets_manager'}
-    if key_path:
-        return {'app_id': app_id, 'pem': _read_key_file(key_path), 'source': 'file'}
-    raise AppConfigError('github_app_id is set but no private key is configured. Set '
-                         'github_app_private_key_path in .settings.json, or write the '
-                         'lde/github-app secret in AWS.')
-
-
-_MAX_APPS = 50
-
-
-def _list_entry(raw, i, key_field):
-    """Validate one github_apps / github_apps_secret entry; return (owner, app_id, value)."""
-    if not isinstance(raw, dict):
-        raise AppConfigError(f'GitHub App entry {i + 1} must be a JSON object.')
-    owner = raw.get('owner', '')
-    app_id = raw.get('app_id')
-    if isinstance(app_id, int) and not isinstance(app_id, bool):
-        app_id = str(app_id)
-    value = raw.get(key_field)
-    if not isinstance(owner, str) or (owner and not _OWNER_RE.match(owner)):
-        raise AppConfigError(f'GitHub App entry {i + 1}: owner must be a GitHub org, user or '
-                             'enterprise name.')
-    if not isinstance(app_id, str) or not _APP_ID_RE.match(app_id.strip()):
-        raise AppConfigError(f'GitHub App entry {i + 1}: app_id must be the numeric App ID.')
-    if not isinstance(value, str) or not value.strip():
-        raise AppConfigError(f'GitHub App entry {i + 1}: {key_field} is missing.')
-    return owner.lower(), app_id.strip(), value
-
-
-def app_configs(cfg):
-    """Return every configured app as ``[{'app_id', 'pem', 'source', 'owner'}]`` ([] for none).
-
-    *owner* is the lower-cased account that owns the app, or '' when unknown.
-    Any malformed entry, a repeated App ID or two apps for one owner raises
-    AppConfigError: a broken app setup is never silently skipped.
-    """
-    apps = []
-    single = app_config(cfg)
-    if single is not None:
-        apps.append(dict(single, owner=''))
-    for field, key_field, source in (('github_apps', 'private_key_path', 'file'),
-                                     ('github_apps_secret', 'private_key', 'secrets_manager')):
-        entries = cfg.get(field) or []
-        if not isinstance(entries, list):
-            raise AppConfigError(f'{field} must be a list of GitHub Apps.')
-        for i, raw in enumerate(entries):
-            owner, app_id, value = _list_entry(raw, i, key_field)
-            pem = _read_key_file(value) if source == 'file' else value.encode('utf-8')
-            apps.append({'app_id': app_id, 'pem': pem, 'source': source, 'owner': owner})
-    if len(apps) > _MAX_APPS:
-        raise AppConfigError(f'At most {_MAX_APPS} GitHub Apps can be configured.')
-    ids = [a['app_id'] for a in apps]
-    if len(set(ids)) != len(ids):
-        raise AppConfigError('The same GitHub App ID is configured more than once.')
-    owners = [a['owner'] for a in apps if a['owner']]
-    if len(set(owners)) != len(owners):
-        raise AppConfigError('More than one GitHub App is configured for the same owner.')
-    return apps
-
-
-def app_for_owner(apps, owner):
-    """The configured app owned by *owner*, or None."""
-    owner = (owner or '').lower()
-    return next((a for a in apps if owner and a['owner'] == owner), None)
+_MAX_KEYS = 64  # bound on parsed keys kept in memory
 
 
 # ---- JWT ------------------------------------------------------------------
@@ -238,7 +139,7 @@ def _load_private_key(pem):
         if not isinstance(key, rsa.RSAPrivateKey) or key.key_size < 2048:
             raise AppConfigError('The GitHub App private key must be an RSA key of at least '
                                  '2048 bits.')
-        if len(_key_cache) >= _MAX_APPS:
+        if len(_key_cache) >= _MAX_KEYS:
             _key_cache.clear()  # bounded: drop everything rather than grow
         _key_cache[digest] = key
         return key
@@ -342,9 +243,9 @@ def _lookup_installation(cfg_app, owner):
             if exc.status == 404:
                 continue
             if exc.status == 401:
-                raise AppAuthError('GitHub rejected the app JWT (HTTP 401). Check github_app_id '
-                                   'and that the private key belongs to that app and has not '
-                                   'been revoked.', status=401) from None
+                raise AppAuthError('GitHub rejected the app JWT (HTTP 401). Check app_id and '
+                                   'that the private key belongs to that app and has not been '
+                                   'revoked.', status=401) from None
             raise
         inst_id = doc.get('id') if isinstance(doc, dict) else None
         if isinstance(inst_id, int) and inst_id > 0:
@@ -415,22 +316,6 @@ def installation_token(cfg_app, owner):
             raise
         _tokens[tkey] = (token, expires)
         return token
-
-
-def token_for(apps, owner):
-    """Return ``(token, app)`` for *owner* from the first app installed there, else ``(None, None)``.
-
-    The app owned by *owner* is tried first, then the others in config order
-    (an enterprise-owned or public app can be installed on many orgs). Errors
-    are raised, not skipped: a broken app fails closed.
-    """
-    own = app_for_owner(apps, owner)
-    ordered = ([own] if own else []) + [a for a in apps if a is not own]
-    for app in ordered:
-        token = installation_token(app, owner)
-        if token:
-            return token, app
-    return None, None
 
 
 def invalidate(owner):

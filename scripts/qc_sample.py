@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Quality-control sampling: verify sampled packages from live manifests appear in Dependency-Track.
 
-Samples ~20% of repos per org from ``default_orgs`` (configured in
-``.settings.json``), finds Python and JavaScript manifests in each, samples
+Samples ~20% of repos per org from the orgs with ``scan: true`` in the
+GitHub org map (Settings -> GitHub auth; docs/github-app.md), finds Python and JavaScript manifests in each, samples
 3-5 direct dependencies per manifest, and checks each package against the
 Dependency-Track instance.
 
@@ -82,6 +82,16 @@ def _manifest_lang(path):
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
+
+def _scan_orgs():
+    """The orgs with scan on in the GitHub org map; [] when it cannot be read."""
+    from backend import gh_config
+    try:
+        return gh_config.scan_orgs(gh_config.load())
+    except gh_config.ConfigError as exc:
+        print(f'Warning: GitHub config: {exc}', file=sys.stderr)
+        return []
+
 
 def _load_settings():
     path = os.path.join(SERVE_DIR, '.settings.json')
@@ -345,7 +355,7 @@ def main():
     parser.add_argument('--api-key', default=None,
                         help='Dependency-Track API key (env: DTRACK_API_KEY)')
     parser.add_argument('--orgs', nargs='+', default=None,
-                        help='Override default_orgs from settings')
+                        help='Orgs to sample (default: the orgs with scan on in Settings)')
     parser.add_argument('--include-type-defs', action='store_true', default=False,
                         help='Include @types/* TypeScript declaration packages in '
                              'sampling (default: skip — excluded from SBOMs by design)')
@@ -364,10 +374,10 @@ def main():
               file=sys.stderr)
         sys.exit(1)
 
-    orgs = args.orgs or settings.get('default_orgs') or []
+    orgs = args.orgs or _scan_orgs()
     if not orgs:
-        print('Error: no orgs configured. Set default_orgs in .settings.json or pass --orgs.',
-              file=sys.stderr)
+        print('Error: no orgs configured. Turn scan on for an org in Settings -> GitHub auth, '
+              'or pass --orgs.', file=sys.stderr)
         sys.exit(1)
 
     if args.min_packages > args.max_packages:

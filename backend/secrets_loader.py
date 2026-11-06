@@ -14,15 +14,13 @@ environment variable (ECS sets these automatically on Fargate).
 
 Secret format
 -------------
-All secrets are plain strings except ``lde/basic-auth``, which is a JSON
-object of the form ``{"<username>": "<sha256_of_password>", ...}``,
-``lde/github-app``, a JSON object holding the GitHub App's ID and PEM
-private key, and ``lde/github-pat``, a JSON object mapping each GitHub org to
-its (deprecated) PAT.
+All secrets are plain strings except these JSON objects: ``lde/basic-auth``
+(``{"<username>": "<sha256_of_password>", ...}``), ``lde/github`` (the GitHub
+org map) and the old ``lde/github-pat`` (``{"<org>": "<token>"}``).
 
-    lde/github-app       → settings keys ``github_app_id`` and ``github_app_private_key``
-                            (JSON object ``{"app_id": "<id>", "private_key": "-----BEGIN…"}``)
-    lde/github-pat       → settings key ``github_pats`` (JSON object ``{"<org>": "<token>"}``)
+    lde/github           → settings key ``github_secret``: the whole GitHub org map
+                            (backend/gh_config.py), PATs and inline app keys included
+    lde/github-pat       → (old, read only to migrate) settings key ``github_pats`` (JSON object ``{"<org>": "<token>"}``)
     lde/dtrack-api-key    → settings key ``dtrack_api_key``
     lde/gemini-api-key    → settings key ``gemini_api_key``
     lde/basic-auth        → settings key ``basic_auth_credentials`` (JSON object)
@@ -43,7 +41,7 @@ _ENABLED = os.environ.get('LDE_SECRETS_SOURCE', '').lower() == 'aws'
 
 # Mapping of Secrets Manager secret name → settings key
 _SECRET_MAP = {
-    'lde/github-app': '_github_app',  # expands to github_app_id + github_app_private_key
+    'lde/github': '_github',          # the org map -> github_secret
     'lde/github-pat': 'github_pats',
     'lde/dtrack-api-key': 'dtrack_api_key',
     'lde/gemini-api-key': 'gemini_api_key',
@@ -310,51 +308,31 @@ def _parse_pats(raw):
     return doc
 
 
-def _app_entry_ok(e):
-    app_id = e.get('app_id') if isinstance(e, dict) else None
-    if isinstance(app_id, int) and not isinstance(app_id, bool):
-        app_id = str(app_id)
-    return (isinstance(app_id, str) and app_id.strip().isdigit()
-            and isinstance(e.get('owner', ''), str)
-            and isinstance(e.get('private_key'), str) and '-----BEGIN' in e['private_key'])
+def _parse_github(raw):
+    """Parse lde/github into ``github_secret`` (or ``github_secret_error``); {} when unset.
 
-
-def _parse_app(raw):
-    """Parse lde/github-app into settings keys; {} when unusable.
-
-    Two shapes are accepted:
-
-    - ``{"apps": [{"owner", "app_id", "private_key"}, ...]}`` -> ``github_apps_secret``
-    - ``{"app_id", "private_key"}`` (one app) -> ``github_app_id`` + ``github_app_private_key``
-
-    Only the shape is checked here; gh_app validates entries and parses keys. The
-    value is never logged, only the fact that it was rejected.
+    Only the JSON shape is checked here; gh_config validates the map. The value
+    is never logged.
     """
-    if raw.strip() == _PLACEHOLDER:
+    if raw is None or not raw.strip() or raw.strip() == _PLACEHOLDER:
         return {}
     try:
         doc = json.loads(raw)
     except ValueError:
         doc = None
-    if isinstance(doc, dict) and 'apps' in doc:
-        apps = doc['apps']
-        if not isinstance(apps, list) or not all(_app_entry_ok(e) for e in apps):
-            logger.warning('secret lde/github-app must be {"apps": [{"owner": "<org>", '
-                           '"app_id": "<numeric id>", "private_key": "<PEM>"}]}; ignoring it')
-            return {}
-        return {'github_apps_secret': [
-            {'owner': e.get('owner', ''), 'app_id': str(e['app_id']).strip(),
-             'private_key': e['private_key']} for e in apps]}
-    app_id = doc.get('app_id') if isinstance(doc, dict) else None
-    key = doc.get('private_key') if isinstance(doc, dict) else None
-    if isinstance(app_id, int) and not isinstance(app_id, bool):
-        app_id = str(app_id)
-    if (not isinstance(app_id, str) or not app_id.strip().isdigit()
-            or not isinstance(key, str) or '-----BEGIN' not in key):
-        logger.warning('secret lde/github-app must be a JSON object '
-                       '{"app_id": "<numeric id>", "private_key": "<PEM>"}; ignoring it')
-        return {}
-    return {'github_app_id': app_id.strip(), 'github_app_private_key': key}
+    if not isinstance(doc, dict):
+        logger.warning('secret lde/github must be a JSON object {"orgs": {...}}; GitHub calls '
+                       'fail until it is fixed')
+        return {'github_secret_error': 'The lde/github secret is not a JSON object. Fix it '
+                                       '(docs/github-app.md) or set it back to REPLACE_ME.'}
+    return {'github_secret': doc}
+
+
+def _mark_unreadable(settings_dict, settings_key, reason):
+    """An unreadable lde/github fails closed: never fall back to the old GitHub secrets."""
+    if settings_key == '_github':
+        settings_dict['github_secret_error'] = (f'Could not read the lde/github secret ({reason}). '
+                                                'GitHub calls fail until it can be read.')
 
 
 def overlay(settings_dict):
@@ -370,9 +348,8 @@ def overlay(settings_dict):
     for secret_name, settings_key in _SECRET_MAP.items():
         try:
             value = _cached_fetch(secret_name)
-            if settings_key == '_github_app':
-                if value:
-                    settings_dict.update(_parse_app(value))
+            if settings_key == '_github':
+                settings_dict.update(_parse_github(value))
                 continue
             if value and settings_key == 'github_pats':
                 value = _parse_pats(value)
@@ -380,7 +357,9 @@ def overlay(settings_dict):
                 settings_dict[settings_key] = value
         except urllib.error.HTTPError as exc:
             logger.warning('failed to fetch secret %s: HTTP %d', secret_name, exc.code)
+            _mark_unreadable(settings_dict, settings_key, f'HTTP {exc.code}')
         except Exception as exc:
             logger.warning('failed to fetch secret %s: %s', secret_name, exc)
+            _mark_unreadable(settings_dict, settings_key, type(exc).__name__)
 
     return settings_dict

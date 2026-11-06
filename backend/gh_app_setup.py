@@ -10,14 +10,17 @@ per org it scans (Settings -> "Create app for <org>"):
    ``complete()`` checks the state, exchanges the one-time code with
    ``POST /app-manifests/{code}/conversions`` and receives the App ID and
    private key.
-3. The key is stored server-side only and the app is appended to the app list:
-   locally a new 0600 file under ``~/.lde`` plus an entry in ``github_apps``,
-   on AWS an entry in the ``lde/github-app`` secret. It never reaches the
-   browser and is never logged. The client secret and webhook secret GitHub
-   also returns are discarded.
+3. The key is stored server-side only and the owner's org entry is set to the
+   new app (``gh_config.store_app``): locally a new 0600 file under ``~/.lde``
+   referenced from "github" in ``.settings.json``, on AWS the PEM inline in
+   the ``lde/github`` secret. It never reaches the browser and is never
+   logged. The client secret and webhook secret GitHub also returns are
+   discarded.
 
-An app is only ever added, never replaced: setup is refused when the owner
-(as GitHub reports it) already has an app, and when the app config is broken.
+An app is never replaced: setup is refused when the owner (as GitHub reports
+it) already authenticates with its own app, and when the org map is broken.
+An org on a PAT, the enterprise app or ``none`` switches to the new app and
+keeps its ``scan`` flag.
 """
 
 import json
@@ -27,7 +30,7 @@ import secrets
 import threading
 import time
 
-from . import gh_app, log as log_mod, secrets_loader, settings as settings_mod
+from . import gh_app, gh_config, log as log_mod
 
 logger = log_mod.get('gh_app_setup')
 
@@ -55,34 +58,26 @@ class SetupError(RuntimeError):
         self.reason = reason
 
 
-def _aws():
-    return os.environ.get('LDE_SECRETS_SOURCE', '').lower() == 'aws'
-
-
-def _configured_apps(cfg):
+def _load_conf():
     try:
-        return gh_app.app_configs(cfg)
-    except gh_app.AppConfigError as exc:
-        raise SetupError('config', f'Fix the GitHub App configuration first: {exc}') from None
-
-
-def _owner_of(app):
-    """The app's owner: from config, else asked of GitHub ('' when that fails)."""
-    if app['owner']:
-        return app['owner']
+        conf = gh_config.load()
+    except gh_config.ConfigError as exc:
+        raise SetupError('config', f'Fix the GitHub config first: {exc}') from None
     try:
-        return gh_app.app_identity(app)['owner'].lower()
-    except (gh_app.AppConfigError, gh_app.AppAuthError):
-        return ''
+        gh_config.check_room_for_app(conf)
+    except gh_config.ConfigError as exc:
+        raise SetupError('store', str(exc)) from None
+    return conf
 
 
-def _ensure_no_app_for(owner, apps):
-    if owner and any(_owner_of(a) == owner for a in apps):
+def _ensure_no_app_for(owner, conf):
+    entry = conf['orgs'].get(owner) if owner else None
+    if entry and entry['auth'] == 'app':
         raise SetupError('exists', f'{owner} already has a GitHub App in LDE. Use '
                                    '"Manage on GitHub" to change it.')
 
 
-def start(origin, org='', name='', cfg=None):
+def start(origin, org='', name='', conf=None):
     """Return ``{'action', 'manifest', 'state'}`` for the browser to form-post to GitHub.
 
     *origin* must already be checked against the server's allowed origins; it
@@ -90,8 +85,7 @@ def start(origin, org='', name='', cfg=None):
     its owner (*org*, or the signed-in user) can install it. Making it public is
     a deliberate step on GitHub's app settings page (docs/github-app.md).
     """
-    cfg = settings_mod.load_settings() if cfg is None else cfg
-    apps = _configured_apps(cfg)
+    conf = _load_conf() if conf is None else conf
     # Check before sending anyone to GitHub: without cryptography the callback cannot
     # check the new key, and GitHub would be left with an app LDE has no key for.
     try:
@@ -106,7 +100,7 @@ def start(origin, org='', name='', cfg=None):
     if org is None or (org and not _ORG_RE.match(org)):
         raise ValueError('org must be a GitHub organization name, or empty for your own account')
     org = org.lower()
-    _ensure_no_app_for(org, apps)
+    _ensure_no_app_for(org, conf)
     if name is not None and not isinstance(name, str):
         raise ValueError('name must be a string')
     name = (name or '').strip()
@@ -204,41 +198,32 @@ def _write_key_file(app_id, pem):
     return path
 
 
-def _secret_apps(raw, apps):
-    """Return lde/github-app's apps as a list of {owner, app_id, private_key} entries."""
-    if raw is None or not raw.strip() or raw.strip() == secrets_loader._PLACEHOLDER:
-        return []
-    parsed = secrets_loader._parse_app(raw)
-    if 'github_apps_secret' in parsed:
-        return list(parsed['github_apps_secret'])
-    if 'github_app_id' in parsed:
-        legacy = {'app_id': parsed['github_app_id'],
-                  'pem': parsed['github_app_private_key'].encode('utf-8'), 'owner': ''}
-        return [{'owner': _owner_of(legacy), 'app_id': parsed['github_app_id'],
-                 'private_key': parsed['github_app_private_key']}]
-    raise SetupError('store', 'lde/github-app holds something LDE cannot read. Fix it or set it '
-                              'back to REPLACE_ME, then start again.')
-
-
-def _store_aws(app, apps):
+def _store(app):
+    """Point the owner's org entry at the new app; write the key file first locally."""
+    written = None
+    if gh_config.key_field() == 'private_key':
+        key_value = app['pem']
+    else:
+        key_value = written = _write_key_file(app['app_id'], app['pem'])
     try:
-        entries = _secret_apps(secrets_loader.get_secret_fresh('lde/github-app'), apps)
-        entries.append({'owner': app['owner'], 'app_id': app['app_id'],
-                        'private_key': app['pem']})
-        secrets_loader.put_secret('lde/github-app', json.dumps({'apps': entries}))
-    except RuntimeError as exc:
+        try:
+            gh_config.store_app(app['owner'], app['app_id'], key_value)
+        except BaseException:
+            if written:  # nothing points at it: do not leave a stray key behind
+                try:
+                    os.unlink(written)
+                except OSError:
+                    pass
+            raise
+    except gh_config.AppExists as exc:
+        raise SetupError('exists', str(exc)) from None
+    except gh_config.ConfigError as exc:
+        raise SetupError('config', str(exc)) from None
+    except (RuntimeError, ValueError, OSError) as exc:
         if isinstance(exc, SetupError):
             raise
-        raise SetupError('store', str(exc)) from None
-
-
-def _store_local(app):
-    path = _write_key_file(app['app_id'], app['pem'])
-    current = settings_mod.load_settings().get('github_apps') or []
-    if not isinstance(current, list):
-        raise SetupError('config', 'github_apps in .settings.json must be a list')
-    settings_mod.save_settings({'github_apps': current + [
-        {'owner': app['owner'], 'app_id': app['app_id'], 'private_key_path': path}]})
+        raise SetupError('store', str(exc) if isinstance(exc, RuntimeError)
+                         else f'Could not save the GitHub config: {type(exc).__name__}') from None
 
 
 def complete(code, state):
@@ -254,18 +239,14 @@ def complete(code, state):
     if not isinstance(code, str) or not _CODE_RE.match(code):
         raise SetupError('exchange', 'GitHub sent no usable code')
     with _complete_lock:
-        apps = _configured_apps(settings_mod.load_settings())
-        _ensure_no_app_for(expected, apps)
+        conf = _load_conf()
+        _ensure_no_app_for(expected, conf)
         app = _convert(code)
         if expected and app['owner'] != expected:
             raise SetupError('exchange', f'GitHub created the app under {app["owner"]}, not '
                                          f'{expected}. Delete it on GitHub and start again.')
-        _ensure_no_app_for(app['owner'], apps)
-        if _aws():
-            _store_aws(app, apps)
-        else:
-            _store_local(app)
-        gh_app.reset_caches()
+        _ensure_no_app_for(app['owner'], conf)
+        _store(app)
     logger.info('created GitHub App %s (id %s) for %s', app['slug'], app['app_id'], app['owner'])
     return {'slug': app['slug'], 'name': app['name'], 'app_id': app['app_id'],
             'owner': app['owner']}

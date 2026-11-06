@@ -1,4 +1,4 @@
-"""Per-org fine-grained PAT selection, settings merge, and masking."""
+"""Per-org credential selection from the GitHub org map (PATs), and the old PAT keys."""
 
 import json
 import os
@@ -16,23 +16,43 @@ def _cfg(**kw):
     return patch.object(settings_mod, 'load_settings', return_value=kw)
 
 
-def test_org_token_preferred_case_insensitive():
-    with _cfg(github_pats={'acme': 'tok-acme', 'b': 'tok-b'}):
+def _orgs(**orgs):
+    return _cfg(github={'orgs': orgs})
+
+
+def _pat(token, scan=True):
+    return {'auth': 'pat', 'scan': scan, 'token': token}
+
+
+def test_org_token_is_used_case_insensitively():
+    with _orgs(acme=_pat('tok-acme'), b=_pat('tok-b')):
         assert github_client._get_token('Acme') == 'tok-acme'
 
 
-def test_star_entry_covers_unlisted_orgs():
-    with _cfg(github_pats={'acme': 'tok-acme', '*': 'any'}):
+def test_org_not_in_the_map_raises_without_naming_tokens():
+    with _orgs(acme=_pat('tok-acme')), pytest.raises(github_client.GhError) as exc:
+        github_client._get_token('other')
+    assert 'not set up' in str(exc.value)
+    assert 'tok-acme' not in str(exc.value)
+
+
+def test_auth_none_raises():
+    with _orgs(acme={'auth': 'none', 'scan': True}), \
+            pytest.raises(github_client.GhError, match='Create app for acme'):
+        github_client._get_token('acme')
+
+
+def test_broken_map_fails_every_org_closed():
+    with _cfg(github={'orgs': {'acme': _pat('t'), 'bad': {'auth': 'pat'}}}), \
+            pytest.raises(github_client.GhError, match='config is broken'):
+        github_client._get_token('acme')
+
+
+def test_old_pats_are_migrated_but_the_star_pat_is_dropped():
+    with _cfg(github_pats={'Acme': 'tok-acme', '*': 'any'}):
         assert github_client._get_token('acme') == 'tok-acme'
-        assert github_client._get_token('other') == 'any'
-
-
-def test_unknown_org_raises_without_star_entry():
-    for pats in ({'acme': 'tok-acme'}, {'a': '1', 'b': '2'}):
-        with _cfg(github_pats=pats), pytest.raises(github_client.GhError) as exc:
+        with pytest.raises(github_client.GhError, match='not set up'):
             github_client._get_token('other')
-        assert 'other' in str(exc.value)
-        assert not any(t in str(exc.value) for t in pats.values())
 
 
 def test_legacy_github_pat_is_ignored():
@@ -43,16 +63,11 @@ def test_legacy_github_pat_is_ignored():
         github_client._get_token('a')
 
 
-def test_no_tokens_raises():
-    with _cfg(github_pats={}), pytest.raises(github_client.GhError):
-        github_client._get_token('acme')
-
-
 def test_missing_token_is_not_mistaken_for_404_by_callers():
-    # An org whose name contains "404" must still surface the missing-token error.
-    with _cfg(github_pats={'a': '1', 'b': '2'}), pytest.raises(github_client.GhError):
+    # An org whose name contains "404" must still surface the missing-credential error.
+    with _orgs(a=_pat('1')), pytest.raises(github_client.GhError):
         github_client.get_repo_default_branch('team404', 'r')
-    with _cfg(github_pats={'a': '1', 'b': '2'}), pytest.raises(github_client.GhError):
+    with _orgs(a=_pat('1')), pytest.raises(github_client.GhError):
         github_client.fetch_dependency_sbom('org403', 'r')
 
 
@@ -63,14 +78,18 @@ def test_request_uses_org_token():
         seen['token'] = token
         return {'default_branch': 'main'}
 
-    with _cfg(github_pats={'acme': 'tok-acme'}), \
+    with _orgs(acme=_pat('tok-acme')), \
             patch.object(github_client, '_get_json', side_effect=fake_get_json):
         assert github_client.get_repo_default_branch('acme', 'r') == 'main'
     assert seen['token'] == 'tok-acme'
 
 
-def test_merge_accepts_star_key():
-    assert settings_mod.merge_github_pats({}, {'*': 't'}) == {'*': 't'}
+def test_orgs_without_credentials_lists_each_unusable_org_once():
+    with _orgs(acme=_pat('t'), b={'auth': 'none', 'scan': False}):
+        missing = github_client.orgs_without_credentials(['Acme', 'b', 'B', 'c', 5])
+    assert [o for o, _ in missing] == ['b', 'c', '5']
+    assert 'Create app for b' in missing[0][1]
+    assert 'not set up' in missing[1][1]
 
 
 def test_load_settings_drops_legacy_pat(tmp_path):
@@ -88,13 +107,13 @@ def test_legacy_notice_when_file_has_github_pat(tmp_path):
     with patch.object(settings_mod, 'SETTINGS_PATH', str(f)), \
             patch.dict(os.environ, {}, clear=False):
         os.environ.pop('LDE_GITHUB_PAT', None)
-        assert 'github_pats' in settings_mod.legacy_pat_notice()
+        assert 'github_pat' in settings_mod.legacy_pat_notice()
         assert 'legacy' not in settings_mod.legacy_pat_notice()
 
 
 def test_no_legacy_notice_for_clean_file(tmp_path):
     f = tmp_path / 's.json'
-    f.write_text('{"github_pats": {"a": "t"}}')
+    f.write_text('{"github": {"orgs": {}}}')
     with patch.object(settings_mod, 'SETTINGS_PATH', str(f)):
         os.environ.pop('LDE_GITHUB_PAT', None)
         assert settings_mod.legacy_pat_notice() == ''
@@ -102,17 +121,17 @@ def test_no_legacy_notice_for_clean_file(tmp_path):
 
 def test_env_override_parses_json_map(tmp_path):
     with patch.object(settings_mod, 'SETTINGS_PATH', str(tmp_path / 'none.json')), \
-            patch.dict(os.environ, {'LDE_GITHUB_PATS': '{"a": "t"}'}):
-        assert settings_mod.load_settings()['github_pats'] == {'a': 't'}
+            patch.dict(os.environ, {'LDE_GITHUB': '{"orgs": {"a": {"auth": "none"}}}'}):
+        assert settings_mod.load_settings()['github'] == {'orgs': {'a': {'auth': 'none'}}}
 
 
 def test_env_override_ignores_bad_json(tmp_path):
     with patch.object(settings_mod, 'SETTINGS_PATH', str(tmp_path / 'none.json')), \
-            patch.dict(os.environ, {'LDE_GITHUB_PATS': 'not json'}):
-        assert settings_mod.load_settings()['github_pats'] == {}
+            patch.dict(os.environ, {'LDE_GITHUB': 'not json'}):
+        assert 'github' not in settings_mod.load_settings()
 
 
-def test_secret_overlay_parses_pats_and_rejects_bad_shapes():
+def test_secret_overlay_parses_old_pats_and_rejects_bad_shapes():
     from backend import secrets_loader
     assert secrets_loader._parse_pats('{"a": "t"}') == {'a': 't'}
     assert secrets_loader._parse_pats('nope') == {}
@@ -120,31 +139,16 @@ def test_secret_overlay_parses_pats_and_rejects_bad_shapes():
     assert secrets_loader._parse_pats('["a"]') == {}
 
 
-def test_merge_adds_updates_removes():
-    out = settings_mod.merge_github_pats({'a': 't1', 'b': 't2'}, {'A': 't1b', 'b': '', 'C': 't3'})
-    assert out == {'a': 't1b', 'c': 't3'}
+def test_masked_hides_every_github_key():
+    out = settings_mod.masked({'github': {'orgs': {'a': _pat('github_pat_secret')}},
+                               'github_pats': {'a': 'github_pat_secret'},
+                               'default_orgs': ['a'], 'github_secret': {}, 'dtrack_url': 'u'})
+    assert out == {'dtrack_url': 'u'}
 
 
-def test_merge_normalizes_existing_mixed_case_keys():
-    # A hand-edited "Acme" entry must still be removed or replaced by the lower-cased UI key.
-    assert settings_mod.merge_github_pats({'Acme': 't1', 'B': 't2'}, {'acme': ''}) == {'b': 't2'}
-    assert settings_mod.merge_github_pats({'Acme': 't1'}, {'acme': 't2'}) == {'acme': 't2'}
-
-
-def test_merge_ignores_masked_values():
-    out = settings_mod.merge_github_pats({'a': 'github_pat_real'}, {'a': 'gith…'})
-    assert out == {'a': 'github_pat_real'}
-
-
-@pytest.mark.parametrize('patch_', [{'bad/org': 't'}, {'a': 5}, ['a'], {'': 't'}])
-def test_merge_rejects_bad_input(patch_):
-    with pytest.raises(ValueError):
-        settings_mod.merge_github_pats({}, patch_)
-
-
-def test_masked_hides_every_token():
-    out = settings_mod.masked({'github_pats': {'a': 'github_pat_secret'}})
-    assert out['github_pats'] == {'a': 'gith…'}
+def test_github_keys_are_not_api_writable():
+    for key in ('github', 'default_orgs', 'github_pats'):
+        assert key not in settings_mod.API_WRITABLE_KEYS
 
 
 def test_save_preserves_legacy_github_pat_on_disk(tmp_path):
@@ -162,13 +166,14 @@ def test_save_preserves_legacy_github_pat_on_disk(tmp_path):
     assert notice
 
 
-def test_orgs_without_credentials_lists_uncovered_orgs():
-    with _cfg(github_pats={'acme': 't'}):
-        assert github_client.orgs_without_credentials(['Acme', 'b', 'B', 'c']) == ['b', 'c']
-    with _cfg(github_pats={'acme': 't', '*': 'any'}):
-        assert github_client.orgs_without_credentials(['b']) == []
-    with _cfg(github_pats={}):
-        assert github_client.orgs_without_credentials(['b']) == ['b']
+def test_save_removes_the_keys_it_is_told_to(tmp_path):
+    f = tmp_path / 's.json'
+    f.write_text('{"default_orgs": ["a"], "github_pats": {"a": "t"}, "dtrack_url": "u"}')
+    with patch.object(settings_mod, 'SETTINGS_PATH', str(f)):
+        settings_mod.save_settings({'github': {'orgs': {}}}, remove=('default_orgs', 'github_pats'))
+    stored = json.loads(f.read_text())
+    assert 'default_orgs' not in stored and 'github_pats' not in stored
+    assert stored['github'] == {'orgs': {}} and stored['dtrack_url'] == 'u'
 
 
 def test_headers_refuse_to_go_out_unauthenticated():
@@ -182,7 +187,7 @@ def test_placeholder_orgs_cover_the_example_file():
                         '.settings.json.example')
     with open(path) as f:
         example = json.load(f)
-    names = set(example.get('default_orgs', [])) | set(example.get('github_pats', {}))
+    names = set(example['github']['orgs'])
     assert names, 'example file lists no orgs'
     assert names <= settings_mod.PLACEHOLDER_ORGS
 

@@ -17,7 +17,7 @@ from backend import github_client  # noqa: E402
 @pytest.fixture(autouse=True)
 def _pat_for_org_o(monkeypatch):
     """Token lookup is per org and reads settings; never touch the real file."""
-    monkeypatch.setattr(github_client.settings_mod, 'load_settings',
+    monkeypatch.setattr(github_client.gh_config.settings_mod, 'load_settings',
                         lambda: {'github_pats': {'o': 'github_pat_test'}})
 
 
@@ -82,7 +82,7 @@ def test_get_repo_default_branch_404(monkeypatch):
 ])
 def test_org_name_containing_404_does_not_hide_other_errors(monkeypatch, fn, args):
     # The URL is in the message, so "404"/"403" in an org name must not look like a status.
-    monkeypatch.setattr(github_client.settings_mod, 'load_settings',
+    monkeypatch.setattr(github_client.gh_config.settings_mod, 'load_settings',
                         lambda: {'github_pats': {'team404': 'github_pat_test'}})
 
     def boom(url, **kw):

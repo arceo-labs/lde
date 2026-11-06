@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend import gh_app, gh_app_setup, gh_auth, secrets_loader, settings as settings_mod  # noqa: E402
+from backend import gh_app, gh_app_setup, gh_config, secrets_loader, settings as settings_mod  # noqa: E402
 
 ORIGIN = 'http://localhost:8002'
 
@@ -30,7 +30,7 @@ PEM = _pem()
 def env(tmp_path, monkeypatch):
     """Empty settings file, key dir under tmp, local mode, no pending states."""
     monkeypatch.delenv('LDE_SECRETS_SOURCE', raising=False)
-    for k in ('LDE_GITHUB_APP_ID', 'LDE_GITHUB_APP_PRIVATE_KEY_PATH'):
+    for k in ('LDE_GITHUB', 'LDE_GITHUB_PATS', 'LDE_DEFAULT_ORGS'):
         monkeypatch.delenv(k, raising=False)
     sfile = tmp_path / 'settings.json'
     sfile.write_text('{}')
@@ -68,6 +68,13 @@ def _start(**kw):
     return gh_app_setup.start(ORIGIN, **kw)
 
 
+def _key_file(env, name='other.pem'):
+    path = env / name
+    path.write_text(PEM)
+    path.chmod(0o600)
+    return str(path)
+
+
 # ---- start ------------------------------------------------------------------
 
 def test_manifest_is_read_only_with_no_webhook():
@@ -102,21 +109,29 @@ def test_bad_input_is_rejected(kw):
         _start(**kw)
 
 
-def test_start_refused_for_an_org_that_already_has_an_app(monkeypatch):
-    # The single-app config has no owner: LDE asks GitHub who owns it.
-    monkeypatch.setattr(gh_app, 'app_identity',
-                        lambda cfg: {'slug': 's', 'name': 'n', 'owner': 'Acme'})
-    cfg = {'github_app_id': '1', 'github_app_private_key': PEM}
+def _write_map(env, **orgs):
+    (env / 'settings.json').write_text(json.dumps({'github': {'orgs': orgs}}))
+
+
+def _stored_orgs(env):
+    return json.loads((env / 'settings.json').read_text())['github']['orgs']
+
+
+def test_start_refused_for_an_org_that_already_has_an_app(env):
+    _write_map(env, acme={'auth': 'app', 'app_id': '1', 'private_key_path': _key_file(env)},
+               globex={'auth': 'pat', 'token': 'github_pat_x'})
     with pytest.raises(gh_app_setup.SetupError) as exc:
-        gh_app_setup.start(ORIGIN, org='acme', cfg=cfg)
+        gh_app_setup.start(ORIGIN, org='Acme')
     assert exc.value.reason == 'exists'
-    # Another org can still get its own app.
-    assert 'organizations/globex/' in gh_app_setup.start(ORIGIN, org='globex', cfg=cfg)['action']
+    # An org on a PAT, or not listed yet, can still get its own app.
+    assert 'organizations/globex/' in gh_app_setup.start(ORIGIN, org='globex')['action']
+    assert 'organizations/initech/' in gh_app_setup.start(ORIGIN, org='initech')['action']
 
 
-def test_start_refused_when_app_config_is_broken():
+def test_start_refused_when_the_org_map_is_broken(env):
+    _write_map(env, acme={'auth': 'app'})
     with pytest.raises(gh_app_setup.SetupError) as exc:
-        gh_app_setup.start(ORIGIN, cfg={'github_app_id': '1'})
+        gh_app_setup.start(ORIGIN, org='globex')
     assert exc.value.reason == 'config'
 
 
@@ -151,15 +166,14 @@ def test_complete_stores_key_file_and_settings(env, github):
     key_file = env / 'lde' / 'github-app-4242.pem'
     assert key_file.read_text() == PEM
     assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
-    stored = json.loads((env / 'settings.json').read_text())
-    [entry] = stored['github_apps']
-    assert entry['owner'] == 'acme' and entry['app_id'] == '4242'
+    entry = _stored_orgs(env)['acme']
+    assert entry['auth'] == 'app' and entry['scan'] is True and entry['app_id'] == '4242'
     assert os.path.realpath(entry['private_key_path']) == os.path.realpath(key_file)
     dumped = (env / 'settings.json').read_text()
     assert 'CLIENT-SECRET' not in dumped and 'HOOK-SECRET' not in dumped and 'PRIVATE KEY' not in dumped
     # The stored config is usable as-is.
-    [cfg] = gh_app.app_configs(settings_mod.load_settings())
-    assert cfg['app_id'] == '4242' and cfg['source'] == 'file' and cfg['owner'] == 'acme'
+    app = gh_config.app_for(gh_config.load(), 'acme')
+    assert app['app_id'] == '4242' and app['source'] == 'file' and app['pem'] == PEM.encode()
 
 
 def test_state_is_single_use(github):
@@ -222,17 +236,9 @@ def test_short_key_from_github_is_refused(env, github):
     assert json.loads((env / 'settings.json').read_text()) == {}
 
 
-def _key_file(env, name='other.pem'):
-    path = env / name
-    path.write_text(PEM)
-    path.chmod(0o600)
-    return str(path)
-
-
 def test_callback_refused_if_the_org_got_an_app_meanwhile(env, github):
     state = _start(org='acme')['state']
-    (env / 'settings.json').write_text(json.dumps({'github_apps': [
-        {'owner': 'acme', 'app_id': '7', 'private_key_path': _key_file(env)}]}))
+    _write_map(env, acme={'auth': 'app', 'app_id': '7', 'private_key_path': _key_file(env)})
     with pytest.raises(gh_app_setup.SetupError) as exc:
         gh_app_setup.complete('code', state)
     assert exc.value.reason == 'exists' and github.calls == []
@@ -241,21 +247,39 @@ def test_callback_refused_if_the_org_got_an_app_meanwhile(env, github):
 def test_callback_refused_if_github_reports_an_owner_that_has_an_app(env, github):
     # Personal-account start: the owner is only known from GitHub's reply.
     state = _start()['state']
-    (env / 'settings.json').write_text(json.dumps({'github_apps': [
-        {'owner': 'acme', 'app_id': '7', 'private_key_path': _key_file(env)}]}))
+    _write_map(env, acme={'auth': 'app', 'app_id': '7', 'private_key_path': _key_file(env)})
     with pytest.raises(gh_app_setup.SetupError) as exc:
         gh_app_setup.complete('code', state)
     assert exc.value.reason == 'exists'
-    assert len(json.loads((env / 'settings.json').read_text())['github_apps']) == 1
+    assert _stored_orgs(env)['acme']['app_id'] == '7'
 
 
 def test_second_org_gets_its_own_app(env, github):
-    (env / 'settings.json').write_text(json.dumps({'github_apps': [
-        {'owner': 'globex', 'app_id': '7', 'private_key_path': _key_file(env)}]}))
+    _write_map(env, globex={'auth': 'app', 'app_id': '7', 'private_key_path': _key_file(env)})
     gh_app_setup.complete('code', _start(org='acme')['state'])
-    apps = json.loads((env / 'settings.json').read_text())['github_apps']
-    assert [(a['owner'], a['app_id']) for a in apps] == [('globex', '7'), ('acme', '4242')]
-    assert [a['owner'] for a in gh_app.app_configs(settings_mod.load_settings())] == ['globex', 'acme']
+    orgs = _stored_orgs(env)
+    assert [(o, e['app_id']) for o, e in orgs.items()] == [('acme', '4242'), ('globex', '7')]
+
+
+def test_org_on_a_pat_switches_to_its_new_app_and_keeps_scan(env, github):
+    _write_map(env, acme={'auth': 'pat', 'scan': False, 'token': 'github_pat_x'})
+    gh_app_setup.complete('code', _start(org='acme')['state'])
+    entry = _stored_orgs(env)['acme']
+    assert entry['auth'] == 'app' and entry['scan'] is False and 'token' not in entry
+
+
+def test_first_app_moves_the_old_keys_into_the_map(env, github):
+    (env / 'settings.json').write_text(json.dumps({
+        'default_orgs': ['acme', 'globex'], 'github_pats': {'globex': 'github_pat_g', '*': 'x'},
+        'dtrack_url': 'http://dt'}))
+    gh_app_setup.complete('code', _start(org='acme')['state'])
+    stored = json.loads((env / 'settings.json').read_text())
+    assert 'default_orgs' not in stored and 'github_pats' not in stored
+    assert stored['dtrack_url'] == 'http://dt'
+    assert stored['github']['orgs']['globex'] == {'auth': 'pat', 'scan': True,
+                                                  'token': 'github_pat_g'}
+    assert stored['github']['orgs']['acme']['auth'] == 'app'
+    assert '*' not in stored['github']['orgs']
 
 
 def test_owner_other_than_the_requested_org_is_refused(env, github):
@@ -284,10 +308,11 @@ def test_key_file_symlink_is_not_followed(env, github):
     assert not target.exists()
 
 
-def _aws(monkeypatch, current='REPLACE_ME'):
+def _aws(monkeypatch, current='REPLACE_ME', pats='REPLACE_ME', **legacy):
     monkeypatch.setenv('LDE_SECRETS_SOURCE', 'aws')
-    monkeypatch.setattr(settings_mod, 'load_settings', lambda: dict(settings_mod.DEFAULTS))
-    monkeypatch.setattr(secrets_loader, 'get_secret_fresh', lambda name: current)
+    monkeypatch.setattr(settings_mod, 'load_settings', lambda: dict(settings_mod.DEFAULTS, **legacy))
+    monkeypatch.setattr(secrets_loader, 'get_secret_fresh',
+                        lambda name: pats if name == 'lde/github-pat' else current)
     put = MagicMock()
     monkeypatch.setattr(secrets_loader, 'put_secret', put)
     return put
@@ -297,27 +322,38 @@ def test_aws_writes_the_secret_and_not_the_file(env, github, monkeypatch):
     put = _aws(monkeypatch)
     gh_app_setup.complete('code', _start()['state'])
     name, value = put.call_args.args
-    assert name == 'lde/github-app'
-    assert json.loads(value) == {'apps': [{'owner': 'acme', 'app_id': '4242', 'private_key': PEM}]}
-    parsed = secrets_loader._parse_app(value)['github_apps_secret']
-    assert [a['owner'] for a in gh_app.app_configs({'github_apps_secret': parsed})] == ['acme']
+    assert name == 'lde/github'
+    assert json.loads(value) == {'orgs': {'acme': {'auth': 'app', 'scan': True, 'app_id': '4242',
+                                                   'private_key': PEM}}}
+    conf = gh_config.load({'github_secret': json.loads(value)})
+    assert gh_config.app_for(conf, 'acme')['source'] == 'secrets_manager'
     assert not (env / 'lde').exists()
 
 
-def test_aws_appends_and_converts_a_single_app_secret(env, github, monkeypatch):
-    monkeypatch.setattr(gh_app, 'app_identity',
-                        lambda cfg: {'slug': 's', 'name': 'n', 'owner': 'Globex'})
-    put = _aws(monkeypatch, json.dumps({'app_id': '7', 'private_key': PEM}))
+def test_aws_adds_to_the_existing_map(env, github, monkeypatch):
+    current = {'orgs': {'globex': {'auth': 'pat', 'scan': False, 'token': 'github_pat_g'}}}
+    put = _aws(monkeypatch, json.dumps(current))
     gh_app_setup.complete('code', _start(org='acme')['state'])
-    apps = json.loads(put.call_args.args[1])['apps']
-    assert [(a['owner'], a['app_id']) for a in apps] == [('globex', '7'), ('acme', '4242')]
+    orgs = json.loads(put.call_args.args[1])['orgs']
+    assert sorted(orgs) == ['acme', 'globex'] and orgs['globex'] == current['orgs']['globex']
+
+
+def test_aws_migrates_the_old_pat_secret_on_first_write(env, github, monkeypatch):
+    pats = json.dumps({'initech': 'github_pat_i', 'acme': 'github_pat_a'})
+    put = _aws(monkeypatch, 'REPLACE_ME', pats, default_orgs=['globex', 'acme'],
+               github_pats=json.loads(pats))
+    gh_app_setup.complete('code', _start(org='acme')['state'])
+    orgs = json.loads(put.call_args.args[1])['orgs']
+    assert orgs['globex'] == {'auth': 'none', 'scan': True}
+    assert orgs['initech'] == {'auth': 'pat', 'scan': False, 'token': 'github_pat_i'}
+    assert orgs['acme'] == {'auth': 'app', 'scan': True, 'app_id': '4242', 'private_key': PEM}
 
 
 def test_aws_unreadable_secret_is_not_overwritten(env, github, monkeypatch):
     put = _aws(monkeypatch, 'garbage')
     with pytest.raises(gh_app_setup.SetupError) as exc:
         gh_app_setup.complete('code', _start()['state'])
-    assert exc.value.reason == 'store'
+    assert exc.value.reason == 'config'
     put.assert_not_called()
 
 
@@ -325,7 +361,7 @@ def test_aws_write_failure_is_a_store_error(github, monkeypatch):
     _aws(monkeypatch)
 
     def refuse(name, value):
-        raise RuntimeError('AWS Secrets Manager refused the write to lde/github-app (HTTP 400).')
+        raise RuntimeError('AWS Secrets Manager refused the write to lde/github (HTTP 400).')
     monkeypatch.setattr(secrets_loader, 'put_secret', refuse)
     with pytest.raises(gh_app_setup.SetupError) as exc:
         gh_app_setup.complete('code', _start()['state'])
@@ -350,10 +386,10 @@ def test_put_secret_only_writes_lde_secrets(monkeypatch):
 def test_put_secret_signs_put_and_drops_cache(monkeypatch):
     sm = MagicMock(return_value={})
     monkeypatch.setattr(secrets_loader, '_sm_request', sm)
-    secrets_loader._cache['lde/github-app'] = (0, 'old')
-    secrets_loader.put_secret('lde/github-app', 'new')
-    sm.assert_called_once_with('PutSecretValue', {'SecretId': 'lde/github-app', 'SecretString': 'new'})
-    assert 'lde/github-app' not in secrets_loader._cache
+    secrets_loader._cache['lde/github'] = (0, 'old')
+    secrets_loader.put_secret('lde/github', 'new')
+    sm.assert_called_once_with('PutSecretValue', {'SecretId': 'lde/github', 'SecretString': 'new'})
+    assert 'lde/github' not in secrets_loader._cache
 
 
 def test_put_secret_http_error_names_the_permission_not_the_value(monkeypatch):
@@ -364,7 +400,7 @@ def test_put_secret_http_error_names_the_permission_not_the_value(monkeypatch):
         raise urllib.error.HTTPError('u', 400, 'denied', {}, io.BytesIO(b'body'))
     monkeypatch.setattr(secrets_loader, '_sm_request', deny)
     with pytest.raises(RuntimeError) as exc:
-        secrets_loader.put_secret('lde/github-app', 'SECRET-VALUE')
+        secrets_loader.put_secret('lde/github', 'SECRET-VALUE')
     assert 'PutSecretValue' in str(exc.value) and 'SECRET-VALUE' not in str(exc.value)
 
 
@@ -433,14 +469,11 @@ def test_routes_are_registered_and_csp_allows_the_github_form_post():
     assert "form-action 'self' https://github.com" in sent['Content-Security-Policy']
 
 
-def test_gh_status_lists_each_app_with_its_manage_link(monkeypatch):
-    monkeypatch.setattr(gh_app, 'app_identity', lambda cfg: {
-        'slug': f'lde-{cfg["app_id"]}', 'name': 'x', 'owner': 'Acme' if cfg['app_id'] == '1' else 'x'})
-    apps, cfgs, err = gh_auth._apps_status({
-        'github_app_id': '1', 'github_app_private_key': PEM,
-        'github_apps_secret': [{'owner': 'globex', 'app_id': '2', 'private_key': PEM}]})
-    assert err == '' and len(cfgs) == 2
-    assert [(a['owner'], a['install_url']) for a in apps] == [
-        ('acme', 'https://github.com/apps/lde-1/installations/new'),
-        ('globex', 'https://github.com/apps/lde-2/installations/new')]
-    assert 'PRIVATE KEY' not in json.dumps(apps)
+def test_key_file_is_removed_when_the_app_cannot_be_stored(env, github, monkeypatch):
+    def refuse(*a):
+        raise gh_config.AppExists('acme already has a GitHub App in LDE')
+    monkeypatch.setattr(gh_config, 'store_app', refuse)
+    with pytest.raises(gh_app_setup.SetupError) as exc:
+        gh_app_setup.complete('code', _start()['state'])
+    assert exc.value.reason == 'exists'
+    assert not (env / 'lde' / 'github-app-4242.pem').exists()

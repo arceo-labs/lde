@@ -1,6 +1,6 @@
-"""GitHub authentication status for the GitHub App and any fallback PATs.
+"""GitHub authentication status for every org in the GitHub org map.
 
-The app is checked with ``GET /app`` (app JWT) and, per org, by minting an
+Each app is checked with ``GET /app`` (app JWT) and, per org, by minting an
 installation token. Deprecated PATs are checked with ``GET /user``.
 """
 
@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-from . import gh_app, gh_app_setup
+from . import gh_app, gh_app_setup, gh_config
 from . import settings as settings_mod
 
 _API_BASE = 'https://api.github.com'
@@ -53,152 +53,152 @@ def check_token(token):
     return {'ok': False, 'user': '', 'message': f'Could not validate the token ({err}).'}
 
 
-PAT_DEPRECATION = ('GitHub PATs are deprecated. Create a GitHub App for these orgs in Settings, '
-                   'then remove their PATs: {orgs}. See docs/github-app.md.')
+PAT_DEPRECATION = ('GitHub PATs are deprecated. Create a GitHub App for these orgs in Settings: '
+                   '{orgs}. See docs/github-app.md.')
 
 
 def _not_configured_message():
-    where = (' LDE writes the app into the lde/github-app secret.'
+    where = (' LDE writes them into the lde/github secret.'
              if os.environ.get('LDE_SECRETS_SOURCE', '').lower() == 'aws' else '')
-    return ('No GitHub credentials configured. In Settings, click "Create GitHub App on '
-            f'GitHub" (docs/github-app.md).{where}')
+    return ('No GitHub orgs configured. In Settings, add an org and click "Create app for '
+            f'<org>" (docs/github-app.md).{where}')
 
 
-def _apps_status(cfg):
-    """Return (apps, app_cfgs, error). Never raises; never includes key material.
+class _Apps:
+    """Loads each app once per status call and remembers its identity (GET /app)."""
 
-    *apps* is one public description per configured app; *app_cfgs* the loaded
-    configs (with keys) for token checks; *error* a message when the app config
-    is broken, in which case every app-based check fails closed.
-    """
+    def __init__(self):
+        self._ident = {}
+
+    def identity(self, src):
+        key = src['app_id']
+        if key not in self._ident:
+            try:
+                app = gh_config.load_app(src)
+                ident = gh_app.app_identity(app)
+                self._ident[key] = (app, ident, '')
+            except (gh_app.AppConfigError, gh_app.AppAuthError) as exc:
+                msg = str(exc)
+                if getattr(exc, 'status', None) == 401:
+                    msg = (f'GitHub rejected the JWT for app {key} (HTTP 401). Check that the '
+                           'private key belongs to that app and has not been revoked.')
+                self._ident[key] = (None, None, msg)
+        return self._ident[key]
+
+
+def _check_app_org(apps, src, org):
+    """Status fields for an org that authenticates with the app *src*."""
+    app, ident, err = apps.identity(src)
+    out = {'app': '', 'app_name': '', 'install_url': '', 'user': ''}
+    if err:
+        return dict(out, ok=False, message=err)
+    out.update(app=ident['slug'], app_name=ident['name'] or ident['slug'],
+               install_url=gh_app_setup.install_url(ident['slug']))
     try:
-        app_cfgs = gh_app.app_configs(cfg)
-    except gh_app.AppConfigError as exc:
-        return [], [], str(exc)
+        token = gh_app.installation_token(app, org)
+    except (gh_app.AppConfigError, gh_app.AppAuthError) as exc:
+        return dict(out, ok=False, message=str(exc))
+    if not token:
+        return dict(out, ok=False, message=f'{out["app_name"]} is not installed on {org}')
+    return dict(out, ok=True, user=f'{ident["slug"]}[bot]',
+                message=f'GitHub App {out["app_name"]} installed')
 
-    def describe(app_cfg):
-        out = {'owner': app_cfg['owner'], 'app_id': app_cfg['app_id'], 'ok': False, 'slug': '',
-               'name': '', 'key_source': app_cfg['source'], 'install_url': '', 'message': ''}
-        try:
-            ident = gh_app.app_identity(app_cfg)
-        except (gh_app.AppConfigError, gh_app.AppAuthError) as exc:
-            msg = str(exc)
-            if getattr(exc, 'status', None) == 401:
-                msg = (f'GitHub rejected the JWT for app {app_cfg["app_id"]} (HTTP 401). Check '
-                       'that the private key belongs to that app and has not been revoked.')
-            out['message'] = msg
-            return out
-        out.update(ok=True, slug=ident['slug'], name=ident['name'],
-                   owner=app_cfg['owner'] or ident['owner'].lower(),
+
+def _enterprise_status(apps, src):
+    if src is None:
+        return None
+    app, ident, err = apps.identity(src)
+    out = {'enterprise': src['enterprise'], 'app_id': src['app_id'], 'ok': not err,
+           'slug': '', 'name': '', 'install_url': '', 'message': err}
+    if not err:
+        out.update(slug=ident['slug'], name=ident['name'] or ident['slug'],
                    install_url=gh_app_setup.install_url(ident['slug']),
                    message=f'Authenticated as GitHub App {ident["name"] or ident["slug"]}')
-        return out
-
-    apps = []
-    if app_cfgs:
-        with ThreadPoolExecutor(max_workers=min(8, len(app_cfgs))) as pool:
-            apps = list(pool.map(describe, app_cfgs))
-    return apps, app_cfgs, ''
-
-
-def _org_via_apps(app_cfgs, org):
-    """Return (installed, ok, app_id, message) for *org* via the configured apps."""
-    try:
-        token, app = gh_app.token_for(app_cfgs, org)
-    except ValueError:
-        return False, False, '', 'invalid org name'
-    except (gh_app.AppConfigError, gh_app.AppAuthError) as exc:
-        return True, False, '', str(exc)
-    if token:
-        return True, True, app['app_id'], 'GitHub App installed'
-    return False, False, '', 'no GitHub App installed'
+    return out
 
 
 def auth_status():
-    """Return a dict describing GitHub App and PAT auth status.
+    """Return a dict describing how every configured org authenticates.
 
     {
-        'installed': bool,   # True when any GitHub credential is configured
-        'logged_in': bool,   # True when every app works and every listed org is covered
-        'mode': str,         # 'app', 'pat', 'mixed' (apps plus PAT fallbacks) or 'none'
-        'apps': [{'owner', 'app_id', 'ok', 'slug', 'name', 'key_source', 'install_url',
-                  'message'}],
-        'apps_error': str,   # broken app config, else ''
-        'accounts': [{'host', 'org', 'user', 'ok', 'via', 'app'}],  # via: 'app', 'pat' or ''
-        'raw': str,          # human-readable summary for the UI
-        'notice': str,       # old-config or PAT deprecation notice, else ''
+        'installed': bool,      # True when any org or the enterprise app is configured
+        'logged_in': bool,      # True when every org in use authenticates
+        'mode': str,            # 'app', 'pat', 'mixed' (apps and PATs) or 'none'
+        'config_error': str,    # broken org map, else ''
+        'source': str,          # 'secret', 'file', 'legacy' or 'none' (backend/gh_config.py)
+        'enterprise_app': None | {'enterprise', 'app_id', 'ok', 'slug', 'name',
+                                  'install_url', 'message'},
+        'orgs': [{'org', 'auth', 'scan', 'ok', 'user', 'app', 'app_name', 'install_url',
+                  'token_hint', 'message'}],
+        'raw': str,             # human-readable summary for the UI
+        'notice': str,          # old-config or PAT deprecation notice, else ''
     }
 
-    Orgs listed are ``default_orgs``, every PAT org and every app owner. Talks
-    only to api.github.com. Tokens and keys are never echoed or logged.
+    Talks only to api.github.com. Tokens and keys are never echoed or logged;
+    a PAT appears only as ``token_hint`` (its first four characters).
     """
-    cfg = settings_mod.load_settings()
-    pats = settings_mod.github_tokens(cfg)
     notices = [n for n in [settings_mod.legacy_pat_notice()] if n]
-    apps, app_cfgs, apps_error = _apps_status(cfg)
-    by_id = {a['app_id']: a for a in apps}
+    empty = {'installed': False, 'logged_in': False, 'mode': 'none', 'config_error': '',
+             'source': 'none', 'enterprise_app': None, 'orgs': []}
+    try:
+        conf = gh_config.load()
+    except gh_config.ConfigError as exc:
+        return dict(empty, installed=True, config_error=str(exc),
+                    raw=f'GitHub config: {exc}', notice=' '.join(notices))
+    notices.extend(conf['notices'])
+    if not conf['orgs'] and not conf['enterprise_app']:
+        return dict(empty, source=conf['source'], raw=_not_configured_message(),
+                    notice=' '.join(notices))
 
-    if not apps and not apps_error and not pats:
-        return {'installed': False, 'logged_in': False, 'mode': 'none', 'apps': [],
-                'apps_error': '', 'accounts': [], 'raw': _not_configured_message(),
-                'notice': ' '.join(notices)}
+    apps = _Apps()
+    enterprise = _enterprise_status(apps, conf['enterprise_app'])
 
-    default_orgs = [o.lower() for o in (cfg.get('default_orgs') or []) if isinstance(o, str)]
-    owners = {a['owner'] for a in apps if a['owner']}
-    orgs = sorted(set(default_orgs) | {o for o in pats if o != '*'} | owners)
-    if '*' in pats:
-        orgs.append('*')
+    def check(item):
+        org, entry = item
+        auth = entry['auth']
+        base = {'org': org, 'auth': auth, 'scan': entry['scan'], 'ok': False, 'user': '',
+                'app': '', 'app_name': '', 'install_url': '', 'message': '',
+                'token_hint': gh_config.token_hint(entry['token']) if auth == 'pat' else ''}
+        if auth == 'app':
+            return dict(base, **_check_app_org(apps, entry, org))
+        if auth == 'enterprise':
+            return dict(base, **_check_app_org(apps, conf['enterprise_app'], org))
+        if auth == 'pat':
+            res = check_token(entry['token'])
+            return dict(base, ok=res['ok'], user=res['user'], message=f'PAT: {res["message"]}')
+        return dict(base, ok=False, message='no credential yet')
 
-    def check(org):
-        if org != '*' and (app_cfgs or apps_error):
-            if apps_error:
-                return {'ok': False, 'via': 'app', 'user': '', 'app': '',
-                        'message': f'GitHub App config is broken: {apps_error}'}
-            installed, ok, app_id, msg = _org_via_apps(app_cfgs, org)
-            if installed:
-                slug = by_id.get(app_id, {}).get('slug', '')
-                return {'ok': ok, 'via': 'app', 'user': f'{slug}[bot]' if ok and slug else '',
-                        'app': slug, 'message': f'{msg} ({slug})' if slug else msg}
-        pat = pats.get(org) or (pats.get('*') if org != '*' else None)
-        if pat and (org in pats or org == '*'):
-            res = check_token(pat)
-            return {'ok': res['ok'], 'via': 'pat', 'user': res['user'], 'app': '',
-                    'message': f'PAT: {res["message"]}'}
-        if pat:
-            return {'ok': True, 'via': 'pat', 'user': '', 'app': '',
-                    'message': 'covered by the "*" PAT'}
-        reason = 'no GitHub App installed and no PAT' if app_cfgs else 'no PAT'
-        return {'ok': False, 'via': '', 'user': '', 'app': '', 'message': reason}
-
+    items = list(conf['orgs'].items())
     results = []
-    if orgs:
-        with ThreadPoolExecutor(max_workers=min(8, len(orgs))) as pool:
-            results = list(pool.map(check, orgs))
+    if items:
+        # Identities are fetched first, once per app, so the org checks do not race to fetch them.
+        for _, entry in items:
+            if entry['auth'] == 'app':
+                apps.identity(entry)
+        with ThreadPoolExecutor(max_workers=min(8, len(items))) as pool:
+            results = list(pool.map(check, items))
 
-    accounts, lines = [], []
-    if apps_error:
-        lines.append(f'GitHub App config: {apps_error}')
-    for a in apps:
-        lines.append(f'GitHub App {a["slug"] or a["app_id"]}: {a["message"]}')
-    for org, res in zip(orgs, results):
-        accounts.append({'host': 'github.com', 'org': org, 'user': res['user'],
-                         'ok': res['ok'], 'via': res['via'], 'app': res['app']})
-        label = 'all other orgs (*)' if org == '*' else org
-        lines.append(f'{label}: {res["message"]}')
-
-    pat_orgs = [a['org'] for a in accounts if a['via'] == 'pat']
+    lines = []
+    if enterprise:
+        lines.append(f'Enterprise app ({enterprise["enterprise"]}): {enterprise["message"]}')
+    lines.extend(f'{r["org"]} ({r["auth"]}): {r["message"]}' for r in results)
+    pat_orgs = [r['org'] for r in results if r['auth'] == 'pat']
     if pat_orgs:
         notices.append(PAT_DEPRECATION.format(orgs=', '.join(pat_orgs)))
-    uses_app = bool(apps) or bool(apps_error)
-    mode = 'mixed' if uses_app and pat_orgs else 'app' if uses_app else 'pat'
-    apps_ok = not apps_error and all(a['ok'] for a in apps)
+    kinds = {r['auth'] for r in results} - {'none'}
+    uses_app = bool(kinds & {'app', 'enterprise'})
+    mode = ('mixed' if uses_app and 'pat' in kinds else 'app' if uses_app
+            else 'pat' if 'pat' in kinds else 'none')
+    in_use = [r for r in results if r['auth'] != 'none' or r['scan']]
     return {
         'installed': True,
-        'logged_in': apps_ok and all(a['ok'] for a in accounts),
+        'logged_in': (enterprise is None or enterprise['ok']) and bool(in_use)
+                     and all(r['ok'] for r in in_use),
         'mode': mode,
-        'apps': apps,
-        'apps_error': apps_error,
-        'accounts': accounts,
+        'config_error': '',
+        'source': conf['source'],
+        'enterprise_app': enterprise,
+        'orgs': results,
         'raw': '\n'.join(lines),
         'notice': ' '.join(notices),
     }
