@@ -1,6 +1,7 @@
 """Unit tests for scripts/check_aws.py with a fake aws CLI runner."""
 
 import importlib.util
+import json
 import os
 
 import pytest
@@ -95,7 +96,7 @@ def test_allowlist_skipped_for_internal_alb():
     ('lde/github-pat', '{"acme": "github_pat_' + 'x' * 82 + '"}\n', 'FAIL'),
     ('lde/github-pat', '{"acme": "github_pat_' + 'x' * 82 + '"}', 'OK'),
     ('lde/github-pat', '{"bad/org": "github_pat_x"}', 'FAIL'),
-    ('lde/github-pat', '{"acme": "github_pat_x", "*": "ghp_x"}', 'OK'),
+    ('lde/github-pat', '{"acme": "github_pat_x", "*": "ghp_x"}', 'WARN'),
     ('lde/github-pat', '{"acme": "   "}', 'FAIL'),
     ('lde/github-pat', '{"acme": "REPLACE_ME"}', 'FAIL'),
     ('lde/github-pat', '{"acme": "github_pat_x", "b": "REPLACE_ME"}', 'FAIL'),
@@ -104,14 +105,6 @@ def test_allowlist_skipped_for_internal_alb():
     ('lde/github-pat', '{"acme": " github_pat_x"}', 'FAIL'),
     ('lde/github-pat', '{"acme": "something-else-40-chars-long-xxxxxxxxxxxx"}', 'WARN'),
     ('lde/github-pat', 'REPLACE_ME', 'OK'),
-    ('lde/github-app', 'REPLACE_ME', 'WARN'),
-    ('lde/github-app', 'not json', 'FAIL'),
-    ('lde/github-app', '{"app_id": "abc", "private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIEabc\\n-----END RSA PRIVATE KEY-----\\n"}', 'FAIL'),
-    ('lde/github-app', '{"app_id": true, "private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIEabc\\n-----END RSA PRIVATE KEY-----\\n"}', 'FAIL'),
-    ('lde/github-app', '{"app_id": "123", "private_key": "MIIEabc"}', 'FAIL'),
-    ('lde/github-app', '{"app_id": "123", "private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIEabc\\n-----END RSA PRIVATE KEY-----\\n"}', 'OK'),
-    ('lde/github-app', '{"app_id": 123, "private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIEabc\\n-----END RSA PRIVATE KEY-----\\n"}', 'OK'),
-    ('lde/github-app', '{"app_id": "123", "private_key": "-----BEGIN RSA PRIVATE KEY-----\\nMIIEabc\\n-----END RSA PRIVATE KEY-----\\n", "x": 1}', 'WARN'),
     ('lde/gemini-api-key', 'REPLACE_ME', 'WARN'),
     ('lde/gemini-api-key', 'k' * 39, 'OK'),
     ('lde/dtrack-api-key', 'REPLACE_ME', 'FAIL'),
@@ -125,12 +118,6 @@ def test_secret_shape(secret_id, value, level):
 
 
 
-def test_secret_shape_never_echoes_the_private_key():
-    value = '{"app_id": "123", "private_key": "-----BEGIN PRIVATE KEY-----\\nSECRETBYTES\\n-----END PRIVATE KEY-----\\n"}'
-    for v in (value, value.replace('"123"', '"x"'), value.replace('-----END', '-----NOPE')):
-        assert 'SECRETBYTES' not in ca.secret_shape('lde/github-app', v)[1]
-
-
 def _secrets_aws(values):
     def answer(args):
         return 0, {'SecretString': values.get(args[-1], 'k' * 40)}, ''
@@ -138,46 +125,64 @@ def _secrets_aws(values):
 
 
 _BASIC = '{"admin": "' + 'a' * 64 + '"}'
-_APP = '{"app_id": "1", "private_key": "-----BEGIN PRIVATE KEY-----\\nx\\n-----END PRIVATE KEY-----\\n"}'
 
 
-_PEMJ = '-----BEGIN PRIVATE KEY-----\\nx\\n-----END PRIVATE KEY-----\\n'
+_EMPTY_GH = {'lde/github': 'REPLACE_ME', 'lde/github-pat': 'REPLACE_ME'}
 
 
-@pytest.mark.parametrize('value,level', [
-    ('{"apps": [{"owner": "acme", "app_id": "1", "private_key": "' + _PEMJ + '"}]}', 'OK'),
-    ('{"apps": [{"owner": "acme", "app_id": "1", "private_key": "' + _PEMJ + '"},'
-     ' {"owner": "ACME", "app_id": "2", "private_key": "' + _PEMJ + '"}]}', 'FAIL'),
-    ('{"apps": [{"owner": "acme", "app_id": "x", "private_key": "' + _PEMJ + '"}]}', 'FAIL'),
-    ('{"apps": []}', 'FAIL'),
-])
-def test_github_app_list_shape(value, level):
-    got, msg = ca.secret_shape('lde/github-app', value)
-    assert got == level, msg
-    assert 'BEGIN' not in msg
+def _map(**orgs):
+    return json.dumps({'orgs': orgs})
+
+
+_APP_ORG = {'auth': 'app', 'app_id': '1',
+            'private_key': '-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n'}
 
 
 def test_check_secrets_warns_without_any_github_credential():
-    # A fresh deploy creates its GitHub App from the running site, so this is not a failure.
+    # A fresh deploy adds its orgs and apps from the running site, so this is not a failure.
     report = ca.Report()
-    ca.check_secrets(report, _secrets_aws({'lde/basic-auth': _BASIC, 'lde/github-app': 'REPLACE_ME',
-                                           'lde/github-pat': 'REPLACE_ME'}))
+    ca.check_secrets(report, _secrets_aws({'lde/basic-auth': _BASIC, **_EMPTY_GH}))
     assert not report.failed
-    assert 'no GitHub credentials yet' in _lines(report) and 'Create GitHub App' in _lines(report)
+    assert 'no GitHub orgs yet' in _lines(report) and 'GitHub auth' in _lines(report)
 
 
-def test_check_secrets_app_only_passes():
+def test_check_secrets_github_map_passes():
     report = ca.Report()
-    ca.check_secrets(report, _secrets_aws({'lde/basic-auth': _BASIC, 'lde/github-app': _APP,
-                                           'lde/github-pat': 'REPLACE_ME'}))
-    assert not report.failed and 'deprecated' not in _lines(report)
+    ca.check_secrets(report, _secrets_aws({'lde/basic-auth': _BASIC, **_EMPTY_GH,
+                                           'lde/github': _map(acme=_APP_ORG)}))
+    text = _lines(report)
+    assert not report.failed and 'deprecated' not in text and '1 org(s) (1 app), 1 scanned' in text
 
 
-def test_check_secrets_warns_on_pat_fallback():
+def test_check_secrets_warns_on_old_secrets_left_set():
     report = ca.Report()
-    ca.check_secrets(report, _secrets_aws({'lde/basic-auth': _BASIC, 'lde/github-app': 'REPLACE_ME',
+    ca.check_secrets(report, _secrets_aws({'lde/basic-auth': _BASIC, **_EMPTY_GH,
+                                           'lde/github': _map(acme=_APP_ORG),
                                            'lde/github-pat': '{"acme": "github_pat_x"}'}))
-    assert not report.failed and 'deprecated' in _lines(report)
+    assert not report.failed and 'no longer read' in _lines(report)
+
+
+def test_check_secrets_old_secrets_alone_are_migrated_later():
+    report = ca.Report()
+    ca.check_secrets(report, _secrets_aws({'lde/basic-auth': _BASIC, **_EMPTY_GH,
+                                           'lde/github-pat': '{"acme": "github_pat_x"}'}))
+    assert not report.failed and 'until the first save' in _lines(report)
+
+
+@pytest.mark.parametrize('value,level,needle', [
+    (_map(acme=_APP_ORG), 'OK', '1 app'),
+    (_map(acme={'auth': 'pat', 'token': 'github_pat_SECRET'}), 'WARN', 'deprecated'),
+    (_map(acme={'auth': 'pat'}), 'FAIL', 'needs a token'),
+    (_map(**{'*': {'auth': 'pat', 'token': 'github_pat_SECRET'}}), 'FAIL', 'no longer supported'),
+    (_map(acme=dict(_APP_ORG, private_key='-----BEGIN PRIVATE KEY-----SECRET')), 'FAIL', 'PEM'),
+    (_map(acme={'auth': 'app', 'app_id': '1', 'private_key_path': '/k'}), 'FAIL', 'not allowed'),
+    ('not json', 'FAIL', 'not JSON'),
+    ('REPLACE_ME', 'WARN', 'first change'),
+])
+def test_github_map_shape(value, level, needle):
+    got, msg = ca.secret_shape('lde/github', value)
+    assert got == level and needle in msg, msg
+    assert 'SECRET' not in msg
 
 
 # --- leftovers -------------------------------------------------------------

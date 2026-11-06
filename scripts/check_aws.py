@@ -34,14 +34,14 @@ CALL_TIMEOUT = 60
 # Secret name -> Terraform address of the secret shell.
 SECRETS = {
     'lde/basic-auth': 'aws_secretsmanager_secret.basic_auth',
-    'lde/github-app': 'aws_secretsmanager_secret.github_app',
+    'lde/github': 'aws_secretsmanager_secret.github',
     'lde/github-pat': 'aws_secretsmanager_secret.github_pat',
     'lde/dtrack-api-key': 'aws_secretsmanager_secret.dtrack_api_key',
     'lde/gemini-api-key': 'aws_secretsmanager_secret.gemini_api_key',
 }
 PLACEHOLDER = 'REPLACE_ME'
-# Either secret can carry GitHub access; at least one must.
-GITHUB_SECRETS = ('lde/github-app', 'lde/github-pat')
+# The old GitHub secret: read by LDE only until lde/github is written.
+LEGACY_GITHUB_SECRETS = ('lde/github-pat',)
 _PEM_RE = re.compile(r'-----BEGIN (RSA )?PRIVATE KEY-----\n.+\n-----END (RSA )?PRIVATE KEY-----\n?',
                      re.DOTALL)
 
@@ -381,29 +381,35 @@ def check_dns(report, domains, alb_dns, resolver):
                         f'({DOC}, Application DNS)')
 
 
-def _github_apps_shape(secret_id, doc):
-    """Check the {"apps": [{owner, app_id, private_key}]} form of lde/github-app. Never echoes keys."""
-    apps = doc['apps']
-    if not isinstance(apps, list) or not apps:
-        return 'FAIL', f'{secret_id}: "apps" must be a non-empty list'
-    owners, ids = [], []
-    for i, e in enumerate(apps, 1):
-        if not isinstance(e, dict):
-            return 'FAIL', f'{secret_id}: app {i} is not a JSON object'
-        app_id, key, owner = e.get('app_id'), e.get('private_key'), e.get('owner', '')
-        if isinstance(app_id, bool) or not re.fullmatch(r'[0-9]{1,20}', str(app_id or '')):
-            return 'FAIL', f'{secret_id}: app {i}: app_id must be the numeric GitHub App ID'
-        if not isinstance(owner, str) or (owner and not re.fullmatch(r'[A-Za-z0-9._-]+', owner)):
-            return 'FAIL', f'{secret_id}: app {i}: owner must be a GitHub org, user or enterprise name'
-        if not isinstance(key, str) or not _PEM_RE.fullmatch(key):
-            return 'FAIL', f'{secret_id}: app {i}: private_key must be the unencrypted PEM file GitHub generated'
-        ids.append(str(app_id))
-        if owner:
-            owners.append(owner.lower())
-    if len(set(ids)) != len(ids) or len(set(owners)) != len(owners):
-        return 'FAIL', f'{secret_id}: an App ID or owner appears twice'
-    names = ', '.join(f'{o or "?"} ({i})' for o, i in zip([e.get('owner', '') for e in apps], ids))
-    return 'OK', f'{secret_id}: {len(apps)} app(s): {names}'
+def _github_map_shape(secret_id, value):
+    """Check lde/github with the validator LDE itself uses. Never echoes keys or tokens."""
+    sys.path.insert(0, SERVE_DIR)
+    from backend import gh_config
+    try:
+        doc = json.loads(value)
+    except ValueError:
+        return 'FAIL', f'{secret_id} is not JSON (docs/github-app.md)'
+    try:
+        conf = gh_config.validate(doc, path_ok=False, inline_ok=True)
+    except gh_config.ConfigError as exc:
+        return 'FAIL', f'{secret_id}: {exc}'
+    apps = [(f'org {o}', e) for o, e in conf['orgs'].items() if e['auth'] == 'app']
+    if conf['enterprise_app']:
+        apps.append(('enterprise_app', conf['enterprise_app']))
+    for where, e in apps:
+        if not _PEM_RE.fullmatch(e['private_key']):
+            return 'FAIL', (f'{secret_id}: {where}: private_key must be the unencrypted PEM file '
+                            'GitHub generated (use jq --rawfile so newlines survive)')
+    kinds = {}
+    for e in conf['orgs'].values():
+        kinds[e['auth']] = kinds.get(e['auth'], 0) + 1
+    summary = ', '.join(f'{n} {k}' for k, n in sorted(kinds.items())) or 'no orgs'
+    scan = sum(e['scan'] for e in conf['orgs'].values())
+    ent = f'; enterprise app for {conf["enterprise_app"]["enterprise"]}' if conf['enterprise_app'] else ''
+    msg = f'{secret_id}: {len(conf["orgs"])} org(s) ({summary}), {scan} scanned{ent}'
+    if kinds.get('pat'):
+        return 'WARN', msg + '; PATs are deprecated, create a GitHub App for those orgs in Settings'
+    return 'OK', msg
 
 
 def secret_shape(secret_id, value):
@@ -411,11 +417,11 @@ def secret_shape(secret_id, value):
     stripped = value.strip()
     if secret_id == 'lde/gemini-api-key' and value == PLACEHOLDER:
         return 'WARN', f'{secret_id} is {PLACEHOLDER}: Gemini package extraction is off'
-    if secret_id == 'lde/github-app' and value == PLACEHOLDER:
-        return 'WARN', (f'{secret_id} is {PLACEHOLDER}: no GitHub App yet. Create one in LDE '
-                        'under Settings -> Create GitHub App (docs/github-app.md)')
+    if secret_id == 'lde/github' and value == PLACEHOLDER:
+        return 'WARN', (f'{secret_id} is {PLACEHOLDER}: LDE writes it on the first change in '
+                        'Settings -> GitHub auth (docs/github-app.md)')
     if secret_id == 'lde/github-pat' and value == PLACEHOLDER:
-        return 'OK', f'{secret_id} is {PLACEHOLDER}: no PAT fallback (fine when the GitHub App covers every org)'
+        return 'OK', f'{secret_id} is {PLACEHOLDER} (old PAT secret, not needed)'
     if not stripped:
         return 'FAIL', f'{secret_id} is empty'
     if value == PLACEHOLDER:
@@ -431,25 +437,8 @@ def secret_shape(secret_id, value):
                 isinstance(h, str) and re.fullmatch(r'[0-9a-f]{64}', h) for h in doc.values()):
             return 'FAIL', f'{secret_id} must map each username to a 64-char sha256 hex'
         return 'OK', f'{secret_id}: {len(doc)} user(s), sha256 hashes'
-    if secret_id == 'lde/github-app':
-        try:
-            doc = json.loads(value)
-        except ValueError:
-            return 'FAIL', (f'{secret_id} is not JSON: write {{"app_id": "<id>", "private_key": "<PEM>"}} '
-                            '(docs/github-app.md)')
-        if isinstance(doc, dict) and 'apps' in doc:
-            return _github_apps_shape(secret_id, doc)
-        app_id = doc.get('app_id') if isinstance(doc, dict) else None
-        key = doc.get('private_key') if isinstance(doc, dict) else None
-        if isinstance(app_id, bool) or not re.fullmatch(r'[0-9]{1,20}', str(app_id or '')):
-            return 'FAIL', f'{secret_id}: app_id must be the numeric GitHub App ID'
-        if not isinstance(key, str) or not _PEM_RE.fullmatch(key):
-            return 'FAIL', (f'{secret_id}: private_key must be the unencrypted PEM file GitHub '
-                            'generated (use jq --rawfile so newlines survive)')
-        extra = sorted(set(doc) - {'app_id', 'private_key'})
-        if extra:
-            return 'WARN', f'{secret_id}: app_id {app_id}, PEM key; unexpected keys ignored: {", ".join(extra)}'
-        return 'OK', f'{secret_id}: app_id {app_id}, PEM key'
+    if secret_id == 'lde/github':
+        return _github_map_shape(secret_id, value)
     if secret_id == 'lde/github-pat':
         keys = []
 
@@ -473,6 +462,9 @@ def secret_shape(secret_id, value):
         if dupes:
             return 'FAIL', (f'{secret_id} repeats an org (keys are case-insensitive): {", ".join(dupes)}. '
                             'Keep one token per org')
+        if '*' in doc:
+            return 'WARN', (f'{secret_id}: {len(doc)} org(s); the "*" token is no longer used. '
+                            'Add each org in Settings -> GitHub auth instead')
         odd = sorted(k for k, t in doc.items() if not t.startswith(('github_pat_', 'ghp_')))
         if odd:
             return 'WARN', f'{secret_id}: {len(doc)} org(s); no github_pat_ or ghp_ prefix for {", ".join(odd)}'
@@ -491,14 +483,18 @@ def check_secrets(report, aws):
         level, msg = secret_shape(secret_id, value)
         {'OK': report.ok, 'WARN': report.warn, 'FAIL': report.fail}[level](msg)
         usable[secret_id] = level != 'FAIL' and value != PLACEHOLDER
-    if not any(usable.get(s) for s in GITHUB_SECRETS):
-        # Not a failure: on a fresh deploy the app is created from the running site
-        # (Settings -> Create GitHub App), which writes lde/github-app itself.
-        report.warn('no GitHub credentials yet: scans fail until you create the GitHub App '
-                    'in LDE under Settings -> Create GitHub App (docs/github-app.md)')
-    elif usable.get('lde/github-pat'):
-        report.warn('lde/github-pat is set: PATs are deprecated, create a GitHub App for '
-                    'those orgs in Settings and set lde/github-pat back to REPLACE_ME')
+    legacy = [s for s in LEGACY_GITHUB_SECRETS if usable.get(s)]
+    if usable.get('lde/github'):
+        if legacy:
+            report.warn('lde/github-pat is still set but no longer read now that lde/github is '
+                        f'written: set it back to {PLACEHOLDER}')
+    elif legacy:
+        report.warn('LDE reads its GitHub orgs from the old lde/github-pat until the first save '
+                    'in Settings -> GitHub auth moves them into lde/github')
+    else:
+        # Not a failure: on a fresh deploy orgs and apps are added from the running site.
+        report.warn('no GitHub orgs yet: scans fail until you add orgs and create their '
+                    'GitHub Apps in LDE under Settings -> GitHub auth (docs/github-app.md)')
 
 
 def _http(url, auth=None, follow=False):

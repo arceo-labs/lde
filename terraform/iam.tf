@@ -25,7 +25,7 @@ data "aws_iam_policy_document" "ecs_execution_secrets" {
     sid     = "ReadLDESecrets"
     actions = ["secretsmanager:GetSecretValue"]
     resources = [
-      aws_secretsmanager_secret.github_app.arn,
+      aws_secretsmanager_secret.github.arn,
       aws_secretsmanager_secret.github_pat.arn,
       aws_secretsmanager_secret.dtrack_api_key.arn,
       aws_secretsmanager_secret.gemini_api_key.arn,
@@ -60,19 +60,20 @@ data "aws_iam_policy_document" "lde_task_secrets" {
     sid     = "ReadLDESecrets"
     actions = ["secretsmanager:GetSecretValue"]
     resources = [
-      aws_secretsmanager_secret.github_app.arn,
+      aws_secretsmanager_secret.github.arn,
       aws_secretsmanager_secret.github_pat.arn,
       aws_secretsmanager_secret.dtrack_api_key.arn,
       aws_secretsmanager_secret.gemini_api_key.arn,
       aws_secretsmanager_secret.basic_auth.arn,
     ]
   }
-  # Settings -> Create GitHub App stores the new app's ID and private key here
-  # (backend/gh_app_setup.py). Setup is refused while an app is configured.
+  # Settings -> GitHub auth writes the org map here: adding, changing and
+  # removing orgs, and each new app's ID and private key (backend/gh_config.py).
+  # The only secret LDE can write.
   statement {
-    sid       = "WriteGitHubAppSecret"
+    sid       = "WriteGitHubSecret"
     actions   = ["secretsmanager:PutSecretValue"]
-    resources = [aws_secretsmanager_secret.github_app.arn]
+    resources = [aws_secretsmanager_secret.github.arn]
   }
 }
 
@@ -84,7 +85,7 @@ resource "aws_iam_role_policy" "lde_task_secrets" {
 
 # ---- DTrack Execution Role (scoped to db_password only) ---------------------
 # Separate from the LDE execution role so DTrack tasks cannot read LDE secrets
-# (github_app, github_pat, gemini_api_key, dtrack_api_key, basic_auth) at startup.
+# (github, github_pat, gemini_api_key, dtrack_api_key, basic_auth) at startup.
 
 resource "aws_iam_role" "dtrack_execution" {
   name               = "${local.name_prefix}-dtrack-execution"
