@@ -185,25 +185,34 @@ def load_settings():
 
 
 def save_settings(updates, remove=()):
-    """Write *updates* (allowed keys only) to .settings.json; drop the keys in *remove*."""
-    current = load_settings()
+    """Write *updates* (allowed keys only) to .settings.json, drop the keys in *remove*,
+    and return the settings now in effect.
+
+    The file is rewritten from its own contents, never from load_settings(): LDE_*
+    environment overrides and Secrets Manager values stay out of it. Keys the
+    file already holds, including ones LDE no longer reads, are kept.
+    """
+    on_disk = _read_settings_file()
     for k, v in updates.items():
         if k in ALLOWED_KEYS:
-            current[k] = v
+            on_disk[k] = v
     for k in remove:
-        current.pop(k, None)
-    # load_settings() drops the retired github_pat. Keep it on disk, untouched, until
-    # the user deletes it, so an unrelated save does not destroy the "old config"
-    # notice. It never goes into the return value.
-    on_disk = dict(current)
-    # Secrets Manager values are never persisted to the settings file.
+        on_disk.pop(k, None)
     for k in _SECRET_ONLY_KEYS:
         on_disk.pop(k, None)
-    legacy = _stored_legacy_pat()
-    if legacy is not None:
-        on_disk['github_pat'] = legacy
     _write_private_json(SETTINGS_PATH, on_disk)
-    return current
+    return load_settings()
+
+
+def _read_settings_file():
+    """The settings file as stored, or {} when there is none. Raises ValueError if unreadable."""
+    if not os.path.exists(SETTINGS_PATH):
+        return {}
+    with open(SETTINGS_PATH, 'r') as f:
+        stored = json.load(f)
+    if not isinstance(stored, dict):
+        raise ValueError('.settings.json is not a JSON object; fix it before saving settings.')
+    return stored
 
 
 def _write_private_json(path, doc):
@@ -227,15 +236,6 @@ def _write_private_json(path, doc):
         except OSError:
             pass
         raise
-
-
-def _stored_legacy_pat():
-    """Return the raw ``github_pat`` value stored in the settings file, else None."""
-    try:
-        with open(SETTINGS_PATH, 'r') as f:
-            return json.load(f).get('github_pat')
-    except (OSError, ValueError, AttributeError):
-        return None
 
 
 def masked(settings):

@@ -35,6 +35,7 @@ it in **Settings → GitHub auth** or with `PUT`/`DELETE /api/github/orgs/{org}`
 
 App keys are files (`private_key_path`, chmod 600). App IDs and keys are added by **Create app
 for &lt;org&gt;** or by hand, never over HTTP. `LDE_GITHUB` (a JSON object) overrides the map.
+Locally, while it is set, Settings cannot change orgs or create apps.
 In AWS the `lde/github` secret holds the map, with each key inline, and the file key is not
 used. The format, the enterprise app and key handling are in [GitHub App](github-app.md).
 

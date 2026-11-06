@@ -529,6 +529,19 @@ def _lde_auth():
     return user, base64.b64encode(f'{user}:{password}'.encode()).decode()
 
 
+def _gh_status_summary(data):
+    """One line for a good /api/gh-status: each org and how it authenticates. No tokens."""
+    # The orgs logged_in counts: any with a credential, or with scan on.
+    orgs = [r for r in data.get('orgs') or []
+            if isinstance(r, dict) and (r.get('auth') != 'none' or r.get('scan'))]
+    ok = [r for r in orgs if r.get('ok')]
+    parts = [f'{r.get("org")} via {r.get("auth")}' for r in ok]
+    ent = data.get('enterprise_app')
+    if isinstance(ent, dict) and ent.get('ok'):
+        parts.insert(0, f'enterprise app {ent.get("name") or ent.get("slug") or ent.get("app_id")}')
+    return f'{len(ok)}/{len(orgs)} orgs authenticated' + (f' ({", ".join(parts)})' if parts else '')
+
+
 def check_endpoints(report, lde_domain, dtrack_domain):
     base = f'https://{lde_domain}'
     status, _, _ = _http(base + '/')
@@ -562,8 +575,10 @@ def check_endpoints(report, lde_domain, dtrack_domain):
             except ValueError:
                 data = {}
             if status == 200 and data.get(key):
-                who = (data.get('accounts') or [{}])[0].get('user') if key == 'logged_in' else None
-                report.ok(f'{path}: ' + (f'authenticated as {who}' if who else data.get('message', 'ok')))
+                if key == 'logged_in':
+                    report.ok(f'{path}: {_gh_status_summary(data)}')
+                else:
+                    report.ok(f'{path}: {data.get("message", "ok")}')
             else:
                 msg = data.get('message') or data.get('raw') or body[:120] or status
                 getattr(report, level)(f'{path}: {msg}')

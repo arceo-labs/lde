@@ -63,6 +63,10 @@ other secret.
 A secret holds at most 64 KB, which fits about 35 orgs with their own app. **Create app** is
 refused once `lde/github` is close to full; past that, use the enterprise app.
 
+Each save reads `lde/github`, changes one org and writes the whole map back. While a deploy
+runs, the old and new tasks both serve requests, and two saves at once keep only the later
+one. Don't change orgs during a deploy; afterwards, check that every change is still there.
+
 ```json
 {
   "github": {
@@ -86,7 +90,8 @@ following is an error for **every** org, so a typo cannot quietly skip an org:
 - a missing token or App ID;
 - `auth: enterprise` without an `enterprise_app`.
 
-`LDE_GITHUB` (a JSON object) overrides the file locally. `GET /api/settings` never returns the
+`LDE_GITHUB` (a JSON object) overrides the file locally, and Settings then refuses to change
+orgs or create apps, so the map is never copied to disk. `GET /api/settings` never returns the
 map, and `PUT /api/settings` refuses it: use Settings or [`/api/github/orgs`](api.md).
 
 ### Moving from the old settings

@@ -380,3 +380,67 @@ def test_run_check_reports_a_broken_map_once():
                       return_value={'github': _file(acme={'auth': 'pat'})}), \
             pytest.raises(github_client.GhError, match='config is broken'):
         github_client.orgs_without_credentials(['a', 'b', 'c'])
+
+
+# ---- PR review fixes ---------------------------------------------------------------------
+
+def test_aws_map_from_env_must_use_inline_keys(monkeypatch):
+    # Same key rules as the write it would become: no key paths on AWS.
+    monkeypatch.setenv('LDE_SECRETS_SOURCE', 'aws')
+    with pytest.raises(gh_config.ConfigError, match='private_key_path'):
+        gh_config.load({'github': _file(acme={'auth': 'app', 'app_id': '1',
+                                              'private_key_path': '/k.pem'})})
+    conf = gh_config.load({'github': _file(acme={'auth': 'app', 'app_id': '1',
+                                                 'private_key': PEM})})
+    assert conf['orgs']['acme']['auth'] == 'app'
+
+
+def test_settings_save_never_writes_env_or_secret_values(tmp_path, monkeypatch):
+    f = tmp_path / 's.json'
+    f.write_text(json.dumps({'dtrack_url': 'u', 'github': _file(acme={'auth': 'none'}),
+                             'github_app_id': '7'}))
+    monkeypatch.setattr(settings_mod, 'SETTINGS_PATH', str(f))
+    monkeypatch.setenv('LDE_GITHUB', json.dumps(_file(acme={'auth': 'pat',
+                                                            'token': 'github_pat_env'})))
+    monkeypatch.setenv('LDE_DTRACK_API_KEY', 'env-only-key')
+    out = settings_mod.save_settings({'gemini_model': 'm'})
+    stored = json.loads(f.read_text())
+    assert 'github_pat_env' not in f.read_text() and 'env-only-key' not in f.read_text()
+    assert stored == {'dtrack_url': 'u', 'github': _file(acme={'auth': 'none'}),
+                      'github_app_id': '7', 'gemini_model': 'm'}
+    assert out['dtrack_api_key'] == 'env-only-key'  # the effective value is still returned
+
+
+def test_local_org_saves_are_refused_while_env_supplies_the_map(tmp_path, monkeypatch):
+    f = tmp_path / 's.json'
+    f.write_text('{}')
+    monkeypatch.delenv('LDE_SECRETS_SOURCE', raising=False)
+    monkeypatch.setattr(settings_mod, 'SETTINGS_PATH', str(f))
+    monkeypatch.setenv('LDE_GITHUB', json.dumps(_file(acme={'auth': 'pat',
+                                                            'token': 'github_pat_env'})))
+    with pytest.raises(gh_config.ConfigError, match='LDE_GITHUB'):
+        gh_config.set_org('globex')
+    with pytest.raises(gh_config.ConfigError, match='LDE_GITHUB'):
+        gh_config.check_room_for_app(gh_config.load())
+    assert f.read_text() == '{}'
+
+
+def test_setup_callback_query_is_not_logged():
+    import server
+    line = '"GET /api/gh-app/callback?code=abc123&state=xyz HTTP/1.1" 302 -'
+    out = server._redact_request_line(line)
+    assert 'abc123' not in out and 'xyz' not in out
+    assert out == '"GET /api/gh-app/callback?<redacted> HTTP/1.1" 302 -'
+    other = '"GET /api/runs?limit=5 HTTP/1.1" 200 -'
+    assert server._redact_request_line(other) == other
+
+
+def test_check_aws_summarizes_the_org_rows():
+    from scripts import check_aws
+    data = {'logged_in': True, 'enterprise_app': None, 'orgs': [
+        {'org': 'acme', 'auth': 'app', 'scan': True, 'ok': True, 'token_hint': ''},
+        {'org': 'globex', 'auth': 'pat', 'scan': True, 'ok': True, 'token_hint': 'gith'},
+        {'org': 'later', 'auth': 'none', 'scan': False, 'ok': False}]}
+    out = check_aws._gh_status_summary(data)
+    assert out == '2/2 orgs authenticated (acme via app, globex via pat)'
+    assert 'gith' not in out

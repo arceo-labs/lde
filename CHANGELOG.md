@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Saving settings rewrites `.settings.json` from its own contents plus the change. `LDE_*` environment overrides, Secrets Manager values and defaults are no longer copied into the file. Locally, Settings refuses to change GitHub orgs while `LDE_GITHUB` supplies the map.
+- With `--debug`, the access log redacts the query string of `/api/gh-app/callback`, which carries GitHub's one-time code for the new app's key.
 - Basic Auth compares the password hash in constant time (`hmac.compare_digest`), and a malformed stored hash returns 401 instead of raising.
 - Behind the ALB (`X-Forwarded-Proto: https`), responses send `Strict-Transport-Security: max-age=63072000; includeSubDomains`. Plain-HTTP local runs don't.
 - Finished background tasks that are never polled are dropped after 15 minutes, freeing their stored payloads.

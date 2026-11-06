@@ -173,11 +173,20 @@ def _valid_branch(branch):
     return True
 
 
+# The GitHub App setup callback carries a one-time code that GitHub exchanges for the
+# new app's private key, so its query string never goes into the access log.
+_REDACTED_QUERY_RE = re.compile(r'(/api/gh-app/callback/?)\?\S*')
+
+
+def _redact_request_line(line):
+    return _REDACTED_QUERY_RE.sub(r'\1?<redacted>', line)
+
+
 class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         if HTTP_LOG_ENABLED:
-            line = log_mod.safe(fmt % args)
+            line = _redact_request_line(log_mod.safe(fmt % args))
             logger.debug('%s - %s', self.address_string(), line)
 
     # ---- Routing -------------------------------------------------------
