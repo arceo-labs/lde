@@ -123,6 +123,19 @@ def legacy_pat_notice():
     return LEGACY_PAT_NOTICE if present else ''
 
 
+IGNORED_GITHUB_ENV = tuple(f'LDE_{k.upper()}' for k in sorted(GITHUB_KEYS))
+
+
+def github_env_notice():
+    """Name any GitHub env override still set (they are ignored), else ''. Never reads values."""
+    found = [name for name in IGNORED_GITHUB_ENV if name in os.environ]
+    if not found:
+        return ''
+    return (f'{", ".join(found)} {"is" if len(found) == 1 else "are"} ignored: GitHub orgs '
+            'come only from Settings (.settings.json, or lde/github on AWS). Unset '
+            f'{"it" if len(found) == 1 else "them"}.')
+
+
 # Org names that ship in .settings.json.example. Reviewing one of these is almost
 # certainly a copied example config.
 PLACEHOLDER_ORGS = frozenset({
@@ -152,10 +165,6 @@ def github_tokens(cfg):
     return pats
 
 
-# LDE_<KEY> env values parsed as JSON, with the type they must have.
-_JSON_ENV_KEYS = {'github': dict, 'github_pats': dict}
-
-
 def load_settings():
     if os.path.exists(SETTINGS_PATH):
         with open(SETTINGS_PATH, 'r') as f:
@@ -167,20 +176,14 @@ def load_settings():
     # When LDE_SECRETS_SOURCE=aws, overlay values from AWS Secrets Manager.
     from . import secrets_loader
     secrets_loader.overlay(merged)
-    # Allow any allowed key to be overridden via LDE_<KEY_UPPER> env var.
-    # Useful for non-sensitive config (e.g. LDE_DTRACK_URL) in ECS task defs.
-    for key in ALLOWED_KEYS:
+    # Any allowed key except the GitHub ones can be overridden via LDE_<KEY_UPPER>.
+    # Useful for non-sensitive config (e.g. LDE_DTRACK_URL) in ECS task defs. The
+    # GitHub org map comes only from .settings.json or lde/github, the one place
+    # Settings writes it (github_env_notice() flags a leftover variable).
+    for key in ALLOWED_KEYS - GITHUB_KEYS:
         env_val = os.environ.get('LDE_' + key.upper())
-        if env_val is None:
-            continue
-        if key in _JSON_ENV_KEYS:
-            try:
-                env_val = json.loads(env_val)
-            except ValueError:
-                continue
-            if not isinstance(env_val, _JSON_ENV_KEYS[key]):
-                continue
-        merged[key] = env_val
+        if env_val is not None:
+            merged[key] = env_val
     return merged
 
 

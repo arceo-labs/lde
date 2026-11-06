@@ -273,11 +273,10 @@ def load(cfg=None):
         if _legacy_present(cfg):
             notices.append('lde/github-pat is no longer read now that lde/github is set. '
                            'Set it back to REPLACE_ME.')
-    elif cfg.get('github') is not None:
-        # .settings.json or LDE_GITHUB. Same key rules as a write (_stored_base):
-        # inline keys only on AWS, key files only locally.
+    elif cfg.get('github') is not None and not _aws():
+        # On AWS the map is only ever lde/github, the place writes go (_stored_base).
         raw, source = cfg['github'], 'file'
-        path_ok, inline_ok = (False, True) if _aws() else (True, False)
+        path_ok, inline_ok = True, False
         if _legacy_present(cfg):
             notices.append(f'.settings.json has both "github" and old GitHub keys '
                            f'({", ".join(k for k in LEGACY_FILE_KEYS if cfg.get(k))}); the old '
@@ -352,37 +351,25 @@ def _stored_base():
                 raise ConfigError(f'{SECRET_NAME} is not valid JSON. Fix it or set it back to '
                                   'REPLACE_ME.') from None
         cfg = dict(settings_mod.load_settings())
-        if cfg.get('github') is not None:  # LDE_GITHUB: the same map load() reads
-            return cfg['github'], False, True
         pats = secrets_loader.get_secret_fresh('lde/github-pat')
         cfg['github_pats'] = {} if _unset(pats) else secrets_loader._parse_pats(pats)
         if not _unset(pats) and not cfg['github_pats']:
             raise ConfigError('lde/github-pat cannot be read as {"<org>": "<token>"}, so LDE '
                               'will not move it into lde/github. Fix it or set it to REPLACE_ME.')
         return from_legacy(cfg)[0], False, True
-    if os.environ.get('LDE_GITHUB') is not None:
-        # Saving would copy the environment's map, PATs included, into .settings.json.
-        raise ConfigError(_ENV_MAP_ERROR)
     cfg = settings_mod.load_settings()
     if cfg.get('github') is not None:
         return cfg['github'], True, False
     return from_legacy(cfg)[0], True, False
 
 
-_ENV_MAP_ERROR = ('The GitHub orgs come from LDE_GITHUB, so Settings cannot change them. '
-                  'Edit LDE_GITHUB, or unset it to use .settings.json.')
-
-
 def check_room_for_app(conf):
-    """ConfigError when a new app could not be stored, checked before anyone goes to GitHub.
+    """ConfigError when lde/github has no room for one more inline app key (AWS only).
 
-    Locally that is when LDE_GITHUB supplies the map; on AWS, when lde/github
-    has no room for one more inline key. Either way the app would be left on
-    GitHub with nowhere in LDE to store it.
+    Called before sending anyone to GitHub, so a full secret does not leave an
+    app on GitHub that LDE cannot store.
     """
     if not _aws():
-        if os.environ.get('LDE_GITHUB') is not None:
-            raise ConfigError(_ENV_MAP_ERROR)
         return
     size = len(json.dumps(_dump(conf)).encode('utf-8'))
     if size + _APP_ROOM > _SECRET_LIMIT:

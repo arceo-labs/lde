@@ -137,7 +137,8 @@ def auth_status():
     Talks only to api.github.com. Tokens and keys are never echoed or logged;
     a PAT appears only as ``token_hint`` (its first four characters).
     """
-    notices = [n for n in [settings_mod.legacy_pat_notice()] if n]
+    notices = [n for n in [settings_mod.legacy_pat_notice(),
+                           settings_mod.github_env_notice()] if n]
     empty = {'installed': False, 'logged_in': False, 'mode': 'none', 'config_error': '',
              'source': 'none', 'enterprise_app': None, 'orgs': []}
     try:

@@ -119,16 +119,32 @@ def test_no_legacy_notice_for_clean_file(tmp_path):
         assert settings_mod.legacy_pat_notice() == ''
 
 
-def test_env_override_parses_json_map(tmp_path):
+@pytest.mark.parametrize('name,value', [
+    ('LDE_GITHUB', '{"orgs": {"a": {"auth": "pat", "token": "github_pat_env"}}}'),
+    ('LDE_GITHUB_PATS', '{"a": "github_pat_env"}'),
+    ('LDE_DEFAULT_ORGS', '["a"]'),
+])
+def test_github_env_overrides_are_ignored_with_a_notice(tmp_path, name, value):
     with patch.object(settings_mod, 'SETTINGS_PATH', str(tmp_path / 'none.json')), \
-            patch.dict(os.environ, {'LDE_GITHUB': '{"orgs": {"a": {"auth": "none"}}}'}):
-        assert settings_mod.load_settings()['github'] == {'orgs': {'a': {'auth': 'none'}}}
+            patch.dict(os.environ, {name: value}):
+        cfg = settings_mod.load_settings()
+        notice = settings_mod.github_env_notice()
+    key = name[len('LDE_'):].lower()
+    assert key not in cfg
+    assert name in notice and 'github_pat_env' not in notice
 
 
-def test_env_override_ignores_bad_json(tmp_path):
+def test_no_github_env_notice_without_the_variables():
+    with patch.dict(os.environ, {}, clear=False):
+        for name in settings_mod.IGNORED_GITHUB_ENV:
+            os.environ.pop(name, None)
+        assert settings_mod.github_env_notice() == ''
+
+
+def test_other_env_overrides_still_apply(tmp_path):
     with patch.object(settings_mod, 'SETTINGS_PATH', str(tmp_path / 'none.json')), \
-            patch.dict(os.environ, {'LDE_GITHUB': 'not json'}):
-        assert 'github' not in settings_mod.load_settings()
+            patch.dict(os.environ, {'LDE_DTRACK_URL': 'http://env'}):
+        assert settings_mod.load_settings()['dtrack_url'] == 'http://env'
 
 
 def test_secret_overlay_parses_old_pats_and_rejects_bad_shapes():

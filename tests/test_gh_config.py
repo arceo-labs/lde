@@ -341,12 +341,6 @@ def test_aws_first_write_fails_closed_when_old_pats_are_unreadable(monkeypatch, 
     put.assert_not_called()
 
 
-def test_aws_first_write_keeps_an_env_map(monkeypatch):
-    put = _aws_secrets(monkeypatch, {}, cfg={'github': _file(acme={'auth': 'none'})})
-    gh_config.set_org('globex')
-    assert sorted(json.loads(put.call_args.args[1])['orgs']) == ['acme', 'globex']
-
-
 def test_aws_secret_size_is_capped(monkeypatch):
     big = {f'org{i}': {'auth': 'app', 'app_id': str(i), 'private_key': PEM + 'x' * 2000}
            for i in range(40)}
@@ -384,15 +378,12 @@ def test_run_check_reports_a_broken_map_once():
 
 # ---- PR review fixes ---------------------------------------------------------------------
 
-def test_aws_map_from_env_must_use_inline_keys(monkeypatch):
-    # Same key rules as the write it would become: no key paths on AWS.
+def test_aws_never_reads_the_map_from_a_file(monkeypatch):
+    # On AWS the map is only lde/github, where writes go; a file "github" is not used.
     monkeypatch.setenv('LDE_SECRETS_SOURCE', 'aws')
-    with pytest.raises(gh_config.ConfigError, match='private_key_path'):
-        gh_config.load({'github': _file(acme={'auth': 'app', 'app_id': '1',
-                                              'private_key_path': '/k.pem'})})
     conf = gh_config.load({'github': _file(acme={'auth': 'app', 'app_id': '1',
-                                                 'private_key': PEM})})
-    assert conf['orgs']['acme']['auth'] == 'app'
+                                                 'private_key_path': '/k.pem'})})
+    assert conf['orgs'] == {} and conf['source'] == 'none'
 
 
 def test_settings_save_never_writes_env_or_secret_values(tmp_path, monkeypatch):
@@ -400,29 +391,25 @@ def test_settings_save_never_writes_env_or_secret_values(tmp_path, monkeypatch):
     f.write_text(json.dumps({'dtrack_url': 'u', 'github': _file(acme={'auth': 'none'}),
                              'github_app_id': '7'}))
     monkeypatch.setattr(settings_mod, 'SETTINGS_PATH', str(f))
-    monkeypatch.setenv('LDE_GITHUB', json.dumps(_file(acme={'auth': 'pat',
-                                                            'token': 'github_pat_env'})))
     monkeypatch.setenv('LDE_DTRACK_API_KEY', 'env-only-key')
     out = settings_mod.save_settings({'gemini_model': 'm'})
     stored = json.loads(f.read_text())
-    assert 'github_pat_env' not in f.read_text() and 'env-only-key' not in f.read_text()
+    assert 'env-only-key' not in f.read_text()
     assert stored == {'dtrack_url': 'u', 'github': _file(acme={'auth': 'none'}),
                       'github_app_id': '7', 'gemini_model': 'm'}
     assert out['dtrack_api_key'] == 'env-only-key'  # the effective value is still returned
 
 
-def test_local_org_saves_are_refused_while_env_supplies_the_map(tmp_path, monkeypatch):
+def test_org_saves_ignore_a_leftover_github_env_map(tmp_path, monkeypatch):
     f = tmp_path / 's.json'
-    f.write_text('{}')
+    f.write_text(json.dumps({'github': _file(acme={'auth': 'none'})}))
     monkeypatch.delenv('LDE_SECRETS_SOURCE', raising=False)
     monkeypatch.setattr(settings_mod, 'SETTINGS_PATH', str(f))
-    monkeypatch.setenv('LDE_GITHUB', json.dumps(_file(acme={'auth': 'pat',
+    monkeypatch.setenv('LDE_GITHUB', json.dumps(_file(evil={'auth': 'pat',
                                                             'token': 'github_pat_env'})))
-    with pytest.raises(gh_config.ConfigError, match='LDE_GITHUB'):
-        gh_config.set_org('globex')
-    with pytest.raises(gh_config.ConfigError, match='LDE_GITHUB'):
-        gh_config.check_room_for_app(gh_config.load())
-    assert f.read_text() == '{}'
+    gh_config.set_org('globex')
+    assert sorted(json.loads(f.read_text())['github']['orgs']) == ['acme', 'globex']
+    assert 'github_pat_env' not in f.read_text()
 
 
 def test_setup_callback_query_is_not_logged():

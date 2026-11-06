@@ -10,7 +10,7 @@ Secrets Manager and the `PUT /api/settings` endpoint returns `503` — the file 
 
 Each key is resolved in this priority order (highest wins):
 
-1. `LDE_<KEY_UPPER>` environment variable (e.g. `LDE_DTRACK_URL`)
+1. `LDE_<KEY_UPPER>` environment variable (e.g. `LDE_DTRACK_URL`), except for the GitHub keys
 2. AWS Secrets Manager overlay (only when `LDE_SECRETS_SOURCE=aws`)
 3. `.settings.json` on disk
 4. Built-in default
@@ -34,8 +34,7 @@ it in **Settings → GitHub auth** or with `PUT`/`DELETE /api/github/orgs/{org}`
 `PUT /api/settings` rejects it with `400`.
 
 App keys are files (`private_key_path`, chmod 600). App IDs and keys are added by **Create app
-for &lt;org&gt;** or by hand, never over HTTP. `LDE_GITHUB` (a JSON object) overrides the map.
-Locally, while it is set, Settings cannot change orgs or create apps.
+for &lt;org&gt;** or by hand, never over HTTP. No environment variable overrides the map.
 In AWS the `lde/github` secret holds the map, with each key inline, and the file key is not
 used. The format, the enterprise app and key handling are in [GitHub App](github-app.md).
 

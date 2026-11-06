@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** the `"*"` PAT (a token used for any org without its own entry) is no longer supported and is ignored, with a notice. It existed for classic PATs, which reach every org their user can. Add each org it covered in Settings, with its own app or fine-grained PAT. An org not in the org map cannot be scanned.
 - **Breaking:** `default_orgs` and `github_pats` are replaced by the org map. Both are still read until the map is first written, then removed from `.settings.json`. On AWS the old `lde/github-pat` secret is read until `lde/github` is written, then can go back to `REPLACE_ME` (`check_aws.py verify` warns until then). `GET /api/settings` no longer returns any GitHub key, and `PUT /api/settings` rejects them in favour of `/api/github/orgs`.
+- **Breaking:** the GitHub settings have no environment overrides. `LDE_GITHUB_PATS` and `LDE_DEFAULT_ORGS` are ignored, and so is `LDE_GITHUB`; Settings and `/api/gh-status` show a notice while one is set. Terraform never set them. Other `LDE_<KEY>` overrides are unchanged.
 - **Breaking:** `/api/gh-status` returns `orgs` (one entry per org: `auth`, `scan`, `ok`, `user`, `app`, `install_url`, `token_hint`, `message`), `enterprise_app`, `config_error` and `source` instead of `accounts`.
 - `POST /api/runs` with no orgs scans the orgs with `scan: true`. It refuses an org LDE cannot authenticate to, giving the reason per org: not in the map, `auth: none`, or its app not installed.
 - **Deprecated:** `auth: pat`. `/api/gh-status` and Settings list the orgs still on a PAT; creating an org's app replaces its PAT.
@@ -36,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Saving settings rewrites `.settings.json` from its own contents plus the change. `LDE_*` environment overrides, Secrets Manager values and defaults are no longer copied into the file. Locally, Settings refuses to change GitHub orgs while `LDE_GITHUB` supplies the map.
+- Saving settings rewrites `.settings.json` from its own contents plus the change. `LDE_*` environment overrides, Secrets Manager values and defaults are no longer copied into the file.
 - With `--debug`, the access log redacts the query string of `/api/gh-app/callback`, which carries GitHub's one-time code for the new app's key.
 - Basic Auth compares the password hash in constant time (`hmac.compare_digest`), and a malformed stored hash returns 401 instead of raising.
 - Behind the ALB (`X-Forwarded-Proto: https`), responses send `Strict-Transport-Security: max-age=63072000; includeSubDomains`. Plain-HTTP local runs don't.
