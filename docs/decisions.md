@@ -6,7 +6,7 @@ For the pipeline mechanics see `TRD.md` and `README.md` in the repository root.
 
 ---
 
-## 1. PAT-based GitHub auth replaces `gh` CLI (superseded by decision 7)
+## 1. PAT-based GitHub auth replaces `gh` CLI (superseded by decisions 7 and 9)
 
 **Decision:** All GitHub API calls go through `backend/github_client.py` and `backend/gh_auth.py`
 using the `github_pats` setting (one PAT per org), not the `gh` CLI subprocess.
@@ -124,7 +124,7 @@ entirely for development convenience.
 **Decision:** LDE authenticates to GitHub as one GitHub App installed on every scanned org.
 `backend/gh_app.py` signs a nine-minute app JWT, finds the org's installation, and mints a
 one-hour installation token limited to `contents:read` and `metadata:read`. Per-org PATs
-(`github_pats`) remain as a deprecated fallback for orgs without the app.
+remain, deprecated, as an org's `auth: pat` (decision 9).
 
 **Why:**
 
@@ -140,7 +140,7 @@ one-hour installation token limited to `contents:read` and `metadata:read`. Per-
 
 **Trade-off:**
 One runtime dependency (decision 3), and an org owner must install the app on each org. A
-misconfigured app fails closed for every org rather than quietly falling back to PATs.
+misconfigured app fails closed rather than quietly falling back to a PAT.
 
 See [GitHub App](github-app.md).
 
@@ -149,11 +149,10 @@ See [GitHub App](github-app.md).
 **Decision:** LDE is self-hosted, so there is no shared LDE app. **Settings → Create app for
 &lt;org&gt;** uses GitHub's app manifest flow: GitHub creates a private, read-only app owned by
 that org, and `backend/gh_app_setup.py` exchanges the one-time code for the App ID, owner and
-key on the server. LDE keeps a list of apps (`github_apps` locally, `lde/github-app` on AWS)
-and, for each org, uses the app that org owns, else any other configured app installed there.
+key on the server, then points the org's entry in the org map (decision 9) at the new app.
 An enterprise-owned app, added by hand, can cover every org in an enterprise. Locally the setup
-writes a new 0600 key file and `.settings.json`. On AWS it writes `lde/github-app`, which gives
-the ECS task role `secretsmanager:PutSecretValue` on that one secret.
+writes a new 0600 key file and `.settings.json`. On AWS it writes `lde/github`, which gives the
+ECS task role `secretsmanager:PutSecretValue` on that one secret.
 
 **Why:**
 
@@ -170,7 +169,42 @@ the ECS task role `secretsmanager:PutSecretValue` on that one secret.
 
 **Trade-off:**
 One private key per org to rotate. The task role can now write one secret, not just read it.
-Setup only ever adds an app: it is refused when the owner GitHub reports already has one, or
-differs from the org setup was started for, and each callback needs a single-use `state` that
-LDE issued within the hour. Pending `state` values are in memory: a restart between **Create**
-and GitHub's redirect means starting again. Removing an app is a manual config edit.
+Setup never replaces an app. It is refused when the owner GitHub reports already has its own
+app, or differs from the org setup was started for. Each callback needs a single-use `state`
+that LDE issued within the hour. Pending `state` values are in memory: a restart between
+**Create** and GitHub's redirect means starting again.
+
+## 9. One org map, one credential per org
+
+**Decision:** A single map, `orgs: {<org>: {auth, scan, ...}}` plus an optional
+`enterprise_app`, lists every org LDE reads (`backend/gh_config.py`). It replaces
+`default_orgs`, `github_pats` and the app list. `auth` is exactly one of:
+- `app`: the org's own app;
+- `enterprise`: the one enterprise app;
+- `pat`: deprecated;
+- `none`.
+
+`scan` replaces `default_orgs`. On AWS the whole map, keys and PATs included, is the `lde/github`
+secret, which LDE writes from Settings. Locally it is `"github"` in `.settings.json`, with keys
+as 0600 files. The `"*"` PAT is dropped. The old keys are migrated in memory until the first
+write.
+
+**Why:**
+
+- **The config says which credential each org uses.** Before, LDE probed every configured app on
+  an org and then fell back to a PAT, so an org's credential depended on install state across
+  several apps. Now an org's entry names its credential, and a failure is reported rather than
+  routed around.
+- **No catch-all token.** The `"*"` PAT existed for classic PATs, which reach every org their
+  user can. Fine-grained PATs and apps are per org, so each org is listed.
+- **Changeable on AWS.** `PUT /api/settings` is read-only on AWS, so `default_orgs` could not be
+  changed there. Orgs are now edited through `/api/github/orgs`, which writes the secret.
+- **One secret, one write grant.** The task role writes only `lde/github`. The old GitHub
+  secrets are read-only and only read until the map is first written.
+
+**Trade-off:**
+- Every org must be listed: an org not in the map cannot be scanned, even by naming it.
+- The map is validated strictly, so one bad entry stops GitHub access for every org until it
+  is fixed.
+- PATs on AWS now live in a secret that the task role can write.
+- The first save rewrites `.settings.json` without the old keys.

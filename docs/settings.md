@@ -15,10 +15,10 @@ Each key is resolved in this priority order (highest wins):
 3. `.settings.json` on disk
 4. Built-in default
 
-Sensitive keys (`github_pats`, `dtrack_api_key`, `gemini_api_key`) are truncated to 4 chars + `…`
-in all API responses. Their full values are never returned to the browser. GitHub App private
-keys, `github_apps` and `github_app_private_key_path` are left out of API responses entirely.
-`/api/gh-status` describes each app without its key or key path.
+Sensitive keys (`dtrack_api_key`, `gemini_api_key`) are truncated to 4 chars + `…` in all API
+responses. Their full values are never returned to the browser. GitHub settings (the org map and
+the old GitHub keys) are left out of `GET /api/settings` entirely. `/api/gh-status` describes
+each org without its token, key or key path.
 
 ---
 
@@ -26,33 +26,25 @@ keys, `github_apps` and `github_app_private_key_path` are left out of API respon
 
 | Key | Type | Default | Sensitive |
 |---|---|---|---|
-| `github_apps` | array of `{owner, app_id, private_key_path}` | `[]` | Paths only — `.settings.json` / `LDE_GITHUB_APPS`, not the API |
-| `github_app_id` | string (digits) | `""` | No (older single-app form) |
-| `github_app_private_key_path` | string (path) | `""` | Path only — `.settings.json` / env, not the API (older single-app form) |
-| `github_pats` | object `{org: token}` | `{}` | Yes — each token masked in API responses |
-| `default_orgs` | array of strings | `[]` | No |
+| `github` | object `{orgs: {<org>: {...}}, enterprise_app}` | not set | Yes: never returned by the API |
 
-**`github_apps`** — The GitHub Apps LDE authenticates as, usually one private app per org.
-`owner` is the org (or user, or enterprise) that owns the app; LDE tries that app first on that
-org, then every other app. **Settings → Create app for &lt;org&gt;** creates an app and appends it
-here. Key files must be chmod 600. `PUT /api/settings` rejects `github_apps` with `400`. In AWS,
-the `lde/github-app` secret holds the same list, with each key inline. Setup, permissions and
-key handling are in [GitHub App](github-app.md).
+**`github`** — The GitHub org map: every org LDE reads, how each authenticates (`app`,
+`enterprise`, `pat` or `none`), and `scan`, which puts the org in runs that name no orgs. Change
+it in **Settings → GitHub auth** or with `PUT`/`DELETE /api/github/orgs/{org}` ([API](api.md)).
+`PUT /api/settings` rejects it with `400`.
 
-**`github_app_id`** and **`github_app_private_key_path`** — The older single-app form. Still
-read, as one app LDE tries on every org. `PUT /api/settings` rejects
-`github_app_private_key_path` with `400`.
+App keys are files (`private_key_path`, chmod 600). App IDs and keys are added by **Create app
+for &lt;org&gt;** or by hand, never over HTTP. `LDE_GITHUB` (a JSON object) overrides the map.
+In AWS the `lde/github` secret holds the map, with each key inline, and the file key is not
+used. The format, the enterprise app and key handling are in [GitHub App](github-app.md).
 
-**`github_pats`** — **Deprecated.** Used only for orgs no GitHub App is installed on. One
-fine-grained PAT per org, as `{"<org>": "<token>"}`, each with Contents: Read-only and Metadata:
-Read-only. An org that neither the app nor a PAT covers is an error, never an unauthenticated
-call. The key `"*"` is the token for any such org without its own entry.
-`PUT /api/settings` merges per org: send `""` to remove one. `LDE_GITHUB_PATS` (a JSON object)
-overrides the map. In AWS, the secret `lde/github-pat` holds the same JSON object
-([Step 4](aws-deployment.md)).
+### Old GitHub keys
 
-**`default_orgs`** — Org names pre-filled in the Ingest UI. Does not restrict which orgs can be
-scanned — it only sets the default input value.
+`default_orgs` and `github_pats` (on AWS, the `lde/github-pat` secret) are still read, to build
+the org map, until `github` (or `lde/github`) is first written. Then they are removed from
+`.settings.json`. `PUT /api/settings` rejects both. The `"*"` entry of `github_pats` is ignored:
+there is no catch-all token any more. See
+[Moving from the old settings](github-app.md#moving-from-the-old-settings).
 
 ---
 

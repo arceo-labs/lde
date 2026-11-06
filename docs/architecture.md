@@ -60,7 +60,7 @@ choices see [Design decisions](decisions.md).
 
   LDE side-connections:
   ├── EFS  /app/data  ── depexplorer.db · run logs (persistent across restarts)
-  ├── Secrets Manager ── lde/github-app · lde/github-pat (deprecated)
+  ├── Secrets Manager ── lde/github (org map, LDE writes it) · lde/github-pat (old)
   │                      lde/dtrack-api-key · lde/gemini-api-key · lde/basic-auth
   ├── api.github.com        (GitHub App installation tokens · github_sbom ingest)
   └── generativelanguage.googleapis.com   (gemini_api_key · optional)

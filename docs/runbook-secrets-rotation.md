@@ -19,8 +19,8 @@ To confirm a rotation, wait a minute before testing.
 
 | Secret ID | Setting key | What it authenticates |
 |---|---|---|
-| `lde/github-app` | `github_app_id`, `github_app_private_key` | GitHub API as the LDE GitHub App: reads repo trees, fetches manifests, SBOM endpoint |
-| `lde/github-pat` | `github_pats` | **Deprecated** fallback — one PAT per org (JSON object), only for orgs without the app |
+| `lde/github` | `github_secret` | GitHub API: the org map, with each org's app key or (deprecated) PAT. Written by LDE from Settings. |
+| `lde/github-pat` | `github_pats` | **Old.** Read only until `lde/github` is written; then `REPLACE_ME` |
 | `lde/dtrack-api-key` | `dtrack_api_key` | Dependency-Track API — BOM upload, component search |
 | `lde/gemini-api-key` | `gemini_api_key` | Google Gemini — package extraction from URLs/files |
 | `lde/basic-auth` | `basic_auth_credentials` | HTTP Basic Auth gate on all LDE endpoints |
@@ -55,32 +55,32 @@ so rotate without downtime:
 1. On the app's settings page (github.com → owner → Settings → Developer settings → GitHub Apps
    → the app), click **Generate a private key**. GitHub downloads the new `.pem`.
 
-2. Replace that app's `private_key` in the secret's `apps` list, keyed by its App ID (requires
-   `jq`). The temporary file holds every app's key: keep it in `$TMPDIR` and delete it.
+2. Replace that app's `private_key` in `lde/github`. An org's own app is under
+   `.orgs["<org>"]`; the enterprise app is `.enterprise_app`. Requires `jq`. The temporary file
+   holds every key and PAT in the map: keep it in `$TMPDIR` and delete it.
 
    ```bash
-   aws secretsmanager get-secret-value --secret-id lde/github-app \
+   aws secretsmanager get-secret-value --secret-id lde/github \
        --query SecretString --output text --region us-east-1 --profile your-profile \
-       > "$TMPDIR/lde-github-app.json"
-   jq --arg id <app-id> --rawfile key ~/Downloads/<new-key>.pem \
-       '(.apps[] | select(.app_id == $id) | .private_key) = $key' "$TMPDIR/lde-github-app.json" \
+       > "$TMPDIR/lde-github.json"
+   jq --arg org <org> --rawfile key ~/Downloads/<new-key>.pem \
+       '.orgs[$org].private_key = $key' "$TMPDIR/lde-github.json" \
      | tr -d '\n' \
      | aws secretsmanager put-secret-value \
-         --secret-id lde/github-app \
+         --secret-id lde/github \
          --secret-string file:///dev/stdin \
          --region us-east-1 --profile your-profile
-   rm -f "$TMPDIR/lde-github-app.json"
+   rm -f "$TMPDIR/lde-github.json"
    ```
 
-   For the older single-app form (`{"app_id", "private_key"}`), write
-   `jq -n --arg id <app-id> --rawfile key <new-key>.pem '{app_id: $id, private_key: $key}'`
-   instead. Locally, overwrite the app's key file and keep it `chmod 600`.
+   For the enterprise app, use `'.enterprise_app.private_key = $key'`. Locally, overwrite the
+   app's key file and keep it `chmod 600`.
 
 3. Wait a minute, then verify:
 
    ```bash
    curl -su "$BASIC_AUTH" "$ALB/api/gh-status" | python3 -m json.tool
-   # Expect: every "apps" entry "ok": true, every "accounts" entry "via": "app", "ok": true
+   # Expect: "logged_in": true, and "ok": true on every org that uses the app
    ```
 
 4. Delete the old key on the app's settings page, then delete the downloaded `.pem`.
@@ -89,9 +89,9 @@ Tokens already minted with the old key stay valid until they expire (at most an 
 
 ---
 
-## Rotating a `github_pats` token (deprecated)
+## Rotating an org's PAT (deprecated)
 
-Prefer installing the GitHub App on the org and removing its PAT ([GitHub App](github-app.md#migrate-from-pats)).
+Prefer creating a GitHub App for the org, which replaces its PAT ([GitHub App](github-app.md#migrate-from-pats)).
 
 1. Generate a new fine-grained PAT on GitHub:
    - Settings → Developer settings → Personal access tokens → Fine-grained tokens
@@ -102,25 +102,20 @@ Prefer installing the GitHub App on the org and removing its PAT ([GitHub App](g
 2. For each SSO org, authorize the new token:
    - github.com → Settings → Personal access tokens → authorize each org
 
-3. Replace that org's entry in the JSON secret (other orgs are kept; requires `jq`):
+3. In LDE, open **Settings → GitHub auth**, type the new token into the org's row and click
+   **Save**. This works locally and on AWS, where LDE writes `lde/github`. Or call the API:
 
    ```bash
-   aws secretsmanager get-secret-value --secret-id lde/github-pat \
-     --query SecretString --output text \
-     --region us-east-1 --profile your-profile \
-     | jq --arg t "github_pat_XXXX..." '.["example-org"] = $t' \
-     | tr -d '\n' \
-     | aws secretsmanager put-secret-value \
-         --secret-id lde/github-pat \
-         --secret-string file:///dev/stdin \
-         --region us-east-1 --profile your-profile
+   curl -su "$BASIC_AUTH" -X PUT "$ALB/api/github/orgs/example-org" \
+     -H 'Content-Type: application/json' \
+     -d '{"auth": "pat", "token": "github_pat_XXXX..."}'
    ```
 
-4. Verify (within a few seconds of propagation):
+4. Verify:
 
    ```bash
    curl -su "$BASIC_AUTH" "$ALB/api/gh-status" | python3 -m json.tool
-   # Expect: "logged_in": true, one "accounts" entry per org with "ok": true
+   # Expect: "ok": true on the org's entry in "orgs"
    ```
 
 5. Revoke the old PAT on GitHub.
@@ -291,20 +286,20 @@ so a future `terraform apply` does not revert the window.
 
 If the new credential doesn't work, restore the previous version:
 
-Replace `lde/github-pat` with the secret you rotated (for example `lde/github-app`).
+Replace `lde/github` with the secret you rotated (for example `lde/dtrack-api-key`).
 
 ```bash
 # List previous versions
 aws secretsmanager list-secret-version-ids \
-  --secret-id lde/github-pat \
+  --secret-id lde/github \
   --region us-east-1 --profile your-profile
 
 # Restore a specific version
 VERSION_ID="<version-id-from-above>"
 aws secretsmanager put-secret-value \
-  --secret-id lde/github-pat \
+  --secret-id lde/github \
   --secret-string "$(aws secretsmanager get-secret-value \
-      --secret-id lde/github-pat \
+      --secret-id lde/github \
       --version-id "$VERSION_ID" \
       --region us-east-1 --profile your-profile \
       --query SecretString --output text)" \

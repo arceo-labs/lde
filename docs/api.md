@@ -4,7 +4,7 @@ All endpoints require HTTP Basic Auth when `basic_auth_credentials` is configure
 
 Base URL: `http://localhost:8002` (or your `LDE_ALLOWED_ORIGIN` in production).
 
-Every `POST` and `PUT` must send `Content-Type: application/json`, including requests with no body. This guards against cross-site requests. They also fail when an `Origin` header is present and is neither a `localhost`/`127.0.0.1` origin nor `LDE_ALLOWED_ORIGIN`:
+Every `POST`, `PUT` and `DELETE` must send `Content-Type: application/json`, including requests with no body. This guards against cross-site requests. They also fail when an `Origin` header is present and is neither a `localhost`/`127.0.0.1` origin nor `LDE_ALLOWED_ORIGIN`:
 
 - `415` — `{"error": "Content-Type must be application/json"}`
 - `403` — `{"error": "Origin not allowed"}`
@@ -15,24 +15,24 @@ Every `POST` and `PUT` must send `Content-Type: application/json`, including req
 
 ### GET /api/settings
 
-Returns current settings with sensitive keys masked (`github_pats` values, `dtrack_api_key`, `gemini_api_key` are truncated to 4 chars + `…`). The GitHub App private key and `github_app_private_key_path` are never returned.
+Returns current settings with sensitive keys masked (`dtrack_api_key`, `gemini_api_key` are truncated to 4 chars + `…`). GitHub settings are never returned: not the org map (`github`), not the old `default_orgs` or `github_pats` keys, and no token, key or key path. [`GET /api/gh-status`](#get-apigh-status) describes the orgs without secrets.
 
 ```bash
 curl -s -u admin:password http://localhost:8002/api/settings | python3 -m json.tool
 ```
 
-**Response:** `200` — object with all settings keys.
+**Response:** `200` — object with the non-GitHub settings keys.
 
 ---
 
 ### PUT /api/settings
 
-Patches one or more settings keys. Unknown keys return `400`. In Fargate (`LDE_SECRETS_SOURCE=aws`) this endpoint returns `503` — settings are managed via Secrets Manager and cannot be changed through the UI.
+Patches one or more settings keys. Unknown keys return `400`. In Fargate (`LDE_SECRETS_SOURCE=aws`) this endpoint returns `503` — settings are managed via Secrets Manager and cannot be changed through the UI. GitHub orgs are not settings: change them with [`PUT /api/github/orgs/{org}`](#put-apigithuborgsorg), which works in both modes.
 
 ```bash
 curl -s -u admin:password -X PUT http://localhost:8002/api/settings \
   -H 'Content-Type: application/json' \
-  -d '{"github_app_id": "123456", "default_orgs": ["example-org"]}'
+  -d '{"dtrack_url": "http://localhost:8081"}'
 ```
 
 **Request body:** JSON object with any subset of the allowed settings keys.
@@ -40,8 +40,81 @@ curl -s -u admin:password -X PUT http://localhost:8002/api/settings \
 **Response:** `200` — full settings object with sensitive keys masked.
 
 **Errors:**
-- `400` — unknown key, a file-only key (`github_app_private_key_path`), a non-numeric `github_app_id`, or body is not a JSON object
+- `400` — unknown key, a GitHub key (`github`, `default_orgs`, `github_pats`), or body is not a JSON object
 - `503` — deployment is in AWS mode; settings are read-only
+
+---
+
+### PUT /api/github/orgs/{org}
+
+Basic Auth: required when `basic_auth_credentials` is set.
+
+Adds `{org}` to the GitHub org map, or changes its entry ([docs/github-app.md](github-app.md)). `{org}` is a GitHub org or user name (letters, digits, `-`, at most 39), stored lower-cased. Fields left out keep their current value; a new org starts as `{"auth": "none", "scan": true}`.
+
+Locally the map is written to `"github"` in `.settings.json`, and the old GitHub keys are removed from the file. On AWS it is written to the `lde/github` secret. The first write stores the map derived from the old settings, with this change applied.
+
+**Request body** (`Content-Type: application/json`):
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `auth` | string | optional | `pat`, `enterprise` (needs an `enterprise_app` in the map), `none`, or `app` (only when the org already has its own app, for example to change `scan`). An app is created with [`POST /api/gh-app/manifest`](#post-apigh-appmanifest), never here. |
+| `scan` | bool | optional | `true` puts the org in runs that name no orgs |
+| `token` | string | optional | The org's fine-grained PAT, with `auth: pat` only. Write-only. Empty, or a value ending in `…`, keeps the saved token. |
+
+App IDs, keys and key paths are refused.
+
+```bash
+curl -s -u admin:password -X PUT http://localhost:8002/api/github/orgs/globex \
+  -H 'Content-Type: application/json' -H 'Origin: http://localhost:8002' \
+  -d '{"auth": "pat", "scan": true, "token": "github_pat_..."}'
+```
+
+**Response:** `200`
+
+| Field | Type | Description |
+|---|---|---|
+| `org` | string | The org, lower-cased |
+| `auth` | string | `app`, `enterprise`, `pat` or `none` |
+| `scan` | bool | Whether runs that name no orgs scan it |
+| `app_id` | string | `auth: app` only |
+| `token_hint` | string | `auth: pat` only: the first four characters and `…` |
+
+```json
+{"org": "globex", "auth": "pat", "scan": true, "token_hint": "gith…"}
+```
+
+**Errors:**
+
+| Status | When |
+|---|---|
+| `400` | Invalid org name, unknown field, invalid `auth`/`scan`/`token`, `auth: pat` without a token, `auth: app` for an org without its app, `auth: enterprise` without an enterprise app, a broken stored map, or (AWS) the `lde/github` write failed |
+| `403` | `Origin` is not an allowed origin (cross-site guard) |
+| `404` | `{org}` is not a GitHub name (letters, digits and `-` only) |
+| `415` | `Content-Type` is not `application/json` |
+
+---
+
+### DELETE /api/github/orgs/{org}
+
+Basic Auth: required when `basic_auth_credentials` is set.
+
+Removes `{org}` from the GitHub org map. Locally, its app key file stays in `~/.lde`.
+
+```bash
+curl -s -u admin:password -X DELETE http://localhost:8002/api/github/orgs/globex \
+  -H 'Content-Type: application/json' -H 'Origin: http://localhost:8002'
+```
+
+**Response:** `200` — `{"deleted": "globex"}`
+
+**Errors:**
+
+| Status | When |
+|---|---|
+| `400` | A broken stored map, or (AWS) the `lde/github` write failed |
+| `403` | `Origin` is not an allowed origin (cross-site guard) |
+| `404` | `{org}` is not in the map, or is not a GitHub name |
+| `415` | `Content-Type` is not `application/json` |
 
 ---
 
@@ -49,7 +122,11 @@ curl -s -u admin:password -X PUT http://localhost:8002/api/settings \
 
 Basic Auth: required when `basic_auth_credentials` is set.
 
-Checks every configured GitHub App with `GET /app`. Then, for every org in `default_orgs`, every PAT org and every app owner, it mints an installation token from the first app installed there (the org's own app first). For orgs no app covers, it checks the deprecated PAT with `GET /user`. `accounts` has one entry per org; a `*` PAT reports `org: "*"`. No token, key or key path is ever returned.
+Checks every org in the GitHub org map with its own credential:
+- An app org (`auth: app`) or an enterprise org: LDE checks the app with `GET /app`, then mints an installation token on the org.
+- A PAT org: LDE checks the token with `GET /user`.
+
+No token, key or key path is ever returned.
 
 ```bash
 curl -s -u admin:password http://localhost:8002/api/gh-status | python3 -m json.tool
@@ -59,35 +136,39 @@ curl -s -u admin:password http://localhost:8002/api/gh-status | python3 -m json.
 
 | Field | Type | Description |
 |---|---|---|
-| `installed` | bool | `true` when a GitHub App or at least one PAT is configured |
-| `logged_in` | bool | `true` when every app authenticates and every listed org is covered |
-| `mode` | string | `app`, `pat`, `mixed` (apps plus PAT fallbacks), or `none` |
-| `apps` | array | One entry per app: `owner`, `app_id`, `ok`, `slug`, `name`, `key_source` (`file` or `secrets_manager`), `install_url` (the app's GitHub install page when `ok`, else `""`), `message` |
-| `apps_error` | string | Why the app config is unusable (every app-based check then fails); `""` otherwise |
-| `accounts` | array | One entry per org: `host`, `org`, `user`, `ok`, `via` (`app`, `pat` or `""`), `app` (slug of the app that covers it, else `""`) |
+| `installed` | bool | `true` when any org or the enterprise app is configured (or the map is broken) |
+| `logged_in` | bool | `true` when the enterprise app (if any) and every org that is not `none` (or has `scan` on) authenticate |
+| `mode` | string | `app`, `pat`, `mixed` (apps and PATs), or `none` |
+| `config_error` | string | Why the org map is unusable (every GitHub call then fails; `orgs` is empty); `""` otherwise |
+| `source` | string | Where the map comes from: `secret` (`lde/github`), `file` (`.settings.json`), `legacy` (derived from the old keys), or `none` |
+| `enterprise_app` | object or null | `enterprise`, `app_id`, `ok`, `slug`, `name`, `install_url`, `message` |
+| `orgs` | array | One entry per org: `org`, `auth`, `scan`, `ok`, `user` (the app's bot or the PAT's user), `app` (slug), `app_name`, `install_url` (the app's install page, for `app`/`enterprise`), `token_hint` (`pat` only), `message` |
 | `notice` | string | PAT deprecation and old-config notices; empty otherwise |
 | `raw` | string | Human-readable summary for the Settings UI |
 
-Example (each org on its own app, one still on a PAT):
+Example (one org on its own app, one still on a PAT, one not set up):
 
 ```json
 {
   "installed": true,
   "logged_in": true,
   "mode": "mixed",
-  "apps": [
-    {"owner": "acme", "app_id": "123456", "ok": true, "slug": "lde-acme-1f2e",
-     "name": "LDE acme 1f2e", "key_source": "file",
+  "config_error": "",
+  "source": "file",
+  "enterprise_app": null,
+  "orgs": [
+    {"org": "acme", "auth": "app", "scan": true, "ok": true, "user": "lde-acme-1f2e[bot]",
+     "app": "lde-acme-1f2e", "app_name": "LDE acme 1f2e",
      "install_url": "https://github.com/apps/lde-acme-1f2e/installations/new",
-     "message": "Authenticated as GitHub App LDE acme 1f2e"}
+     "token_hint": "", "message": "GitHub App LDE acme 1f2e installed"},
+    {"org": "globex", "auth": "pat", "scan": true, "ok": true, "user": "octocat", "app": "",
+     "app_name": "", "install_url": "", "token_hint": "gith…",
+     "message": "PAT: Authenticated as octocat"},
+    {"org": "hooli", "auth": "none", "scan": false, "ok": false, "user": "", "app": "",
+     "app_name": "", "install_url": "", "token_hint": "", "message": "no credential yet"}
   ],
-  "apps_error": "",
-  "accounts": [
-    {"host": "github.com", "org": "acme", "user": "lde-acme-1f2e[bot]", "ok": true, "via": "app", "app": "lde-acme-1f2e"},
-    {"host": "github.com", "org": "globex", "user": "octocat", "ok": true, "via": "pat", "app": ""}
-  ],
-  "raw": "GitHub App lde-acme-1f2e: Authenticated as GitHub App LDE acme 1f2e\nacme: GitHub App installed (lde-acme-1f2e)\nglobex: PAT: Authenticated as octocat",
-  "notice": "GitHub PATs are deprecated. Create a GitHub App for these orgs in Settings, then remove their PATs: globex. See docs/github-app.md."
+  "raw": "acme (app): GitHub App LDE acme 1f2e installed\nglobex (pat): PAT: Authenticated as octocat\nhooli (none): no credential yet",
+  "notice": "GitHub PATs are deprecated. Create a GitHub App for these orgs in Settings: globex. See docs/github-app.md."
 }
 ```
 
@@ -99,7 +180,7 @@ Basic Auth: required when `basic_auth_credentials` is set.
 
 Starts **Settings → Create GitHub App** (GitHub's app manifest flow). Returns a manifest and the github.com URL the browser form-posts it to. The manifest asks for Contents: Read and Metadata: Read, no webhook, and redirects back to this LDE. The redirect and setup URLs are built from the request's `Origin` header, which must be `http(s)://localhost[:port]`, `http(s)://127.0.0.1[:port]` or exactly `LDE_ALLOWED_ORIGIN`. The `Host` header is never used.
 
-Refused when `org` already has an app in LDE, or when the app config is broken. Other orgs can each get their own app.
+Refused when `org` already has `auth: app` in the org map, or when the map is broken. An org on a PAT, `enterprise` or `none`, or not in the map yet, can get its own app.
 
 **Request body** (`Content-Type: application/json`):
 
@@ -126,7 +207,7 @@ curl -s -u admin:password -X POST http://localhost:8002/api/gh-app/manifest \
 
 | Status | When |
 |---|---|
-| `400` | Missing or disallowed `Origin`, invalid field, unknown field, `org` already has an app, the app config is broken, or `cryptography` is not installed |
+| `400` | Missing or disallowed `Origin`, invalid field, unknown field, `org` already has its own app, the org map is broken, or `cryptography` is not installed |
 | `403` | `Origin` is not an allowed origin (cross-site guard) |
 | `415` | `Content-Type` is not `application/json` |
 
@@ -136,10 +217,10 @@ curl -s -u admin:password -X POST http://localhost:8002/api/gh-app/manifest \
 
 Basic Auth: required when `basic_auth_credentials` is set.
 
-GitHub redirects the browser here after the user clicks **Create GitHub App** on github.com. LDE checks `state`, then exchanges `code` with `POST https://api.github.com/app-manifests/{code}/conversions` for the App ID, owner and private key. It adds the app on the server:
+GitHub redirects the browser here after the user clicks **Create GitHub App** on github.com. LDE checks `state`, then exchanges `code` with `POST https://api.github.com/app-manifests/{code}/conversions` for the App ID, owner and private key. It sets the owner's entry in the org map to `{"auth": "app", "app_id": …}`, keeping its `scan` flag (a new org gets `scan: true`):
 
-- **Locally:** the key goes to a new 0600 file `~/.lde/github-app-<id>.pem`, and `{"owner", "app_id", "private_key_path"}` is appended to `github_apps` in `.settings.json`.
-- **AWS** (`LDE_SECRETS_SOURCE=aws`): `{"owner", "app_id", "private_key"}` is appended to the `apps` list in the `lde/github-app` secret. An older single-app value is converted to the list first.
+- **Locally:** the key goes to a new 0600 file `~/.lde/github-app-<id>.pem`, referenced as `private_key_path` in `"github"` in `.settings.json`.
+- **AWS** (`LDE_SECRETS_SOURCE=aws`): the key goes inline as `private_key` in the `lde/github` secret.
 
 The client secret and webhook secret GitHub also returns are discarded. Nothing is returned to the browser except a redirect. Not meant to be called by hand.
 
@@ -150,9 +231,9 @@ The client secret and webhook secret GitHub also returns are discarded. Nothing 
 | `https://github.com/apps/{slug}/installations/new` | The app was created and stored. The app's setup URL brings the user back to `/settings` after installing. |
 | `/settings?gh_app_error=state` | `state` is unknown, used, or older than an hour |
 | `/settings?gh_app_error=exchange` | GitHub refused the code, returned an app without a usable ID, slug, owner or RSA key, or created it under a different owner than the requested org |
-| `/settings?gh_app_error=store` | The key file or the `lde/github-app` secret could not be read or written |
-| `/settings?gh_app_error=exists` | The new app's owner already has an app in LDE |
-| `/settings?gh_app_error=config` | The app config became unusable while setup was in progress |
+| `/settings?gh_app_error=store` | The key file, `.settings.json` or the `lde/github` secret could not be written |
+| `/settings?gh_app_error=exists` | The new app's owner already has its own app in LDE |
+| `/settings?gh_app_error=config` | The org map is unusable (including an `lde/github` value that is not JSON) |
 
 ---
 
@@ -249,7 +330,7 @@ curl -s -u admin:password -X POST http://localhost:8002/api/runs \
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `method` | string | no | `github_sbom`, the default and only supported method. |
-| `orgs` | array | no | Org names to scan. Defaults to `default_orgs` from settings when omitted or empty. |
+| `orgs` | array | no | Org names to scan. Defaults to the orgs with `scan: true` in the GitHub org map when omitted or empty. |
 | `repos` | array | no | Repo filters: plain names (`"bec-api"`) or `org/repo` pairs. When all entries use `org/repo` format, `orgs` is derived from them. |
 | `use_default` | bool | no | When `true` (or `branch` is empty), every repo uses its GitHub default branch. |
 | `branch` | string | no | Run-level branch override applied to all repos. Ignored when `use_default` is true. Validated against the GitHub branch-ref rules. |
@@ -257,7 +338,7 @@ curl -s -u admin:password -X POST http://localhost:8002/api/runs \
 **Response:** `202` — `{"run_id": "<hex>"}`
 
 **Errors:**
-- `400` — invalid `method`, invalid repo name format, invalid `branch` name, no orgs configured, an example org from `.settings.json.example` (for example `example-org`), or (for `github_sbom`) an org the GitHub App is not installed on that also has no entry in `github_pats` and no `"*"` entry; the message lists those orgs. A misconfigured GitHub App (for example an App ID with no key) is also a `400`
+- `400` — invalid `method`, invalid repo name format, invalid `branch` name, no orgs given and none with `scan: true`, an example org from `.settings.json.example` (for example `example-org`), a broken GitHub org map, or (for `github_sbom`) an org LDE cannot authenticate to: not in the org map, `auth: none`, or its app not installed or failing. The message gives the reason for each such org
 
 ---
 

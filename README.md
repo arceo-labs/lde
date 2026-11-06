@@ -119,7 +119,7 @@ Gemini URL extraction works well for standard advisory sites but has two failure
               OWASP Dependency-Track  (PUT /api/v1/bom)
 ```
 
-Each component is small, single-responsibility Python — no Flask/FastAPI, no SDKs. The only runtime package is `cryptography`, which signs GitHub App JWTs. All GitHub API calls authenticate as a GitHub App installed on each org ([docs/github-app.md](docs/github-app.md)); per-org PATs remain as a deprecated fallback. No `gh` CLI subprocess is required.
+Each component is small, single-responsibility Python — no Flask/FastAPI, no SDKs. The only runtime package is `cryptography`, which signs GitHub App JWTs. Each org LDE reads is listed in one org map with exactly one credential, normally the org's own GitHub App ([docs/github-app.md](docs/github-app.md)); a per-org PAT is still accepted but deprecated. No `gh` CLI subprocess is required.
 
 ## Prerequisites
 
@@ -161,7 +161,7 @@ DTRACK_ADMIN_PASSWORD=admin python3 scripts/bootstrap_dtrack.py \
 # 3) Configure local settings
 cp .settings.json.example .settings.json
 # Edit .settings.json — set dtrack_api_key to the contents of ~/.lde/dtrack-api-key.txt.
-# Override default_orgs to the orgs you want to scan.
+# Then add your orgs in Settings -> GitHub auth (the example orgs are placeholders).
 
 # 4) Boot the local app
 python3 server.py
@@ -268,27 +268,28 @@ All app config lives in `.settings.json` (gitignored). Run `cp .settings.json.ex
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `default_orgs` | `[]` of string | `[]` | Orgs scanned when the **Start run** form is left blank. |
-| `github_app_id` | string | `""` | Numeric GitHub App ID. Set in Settings UI or `.settings.json`. |
-| `github_app_private_key_path` | string | `""` | Path to the app's PEM key (chmod 600). `.settings.json` or env only; the API rejects it. In AWS the `lde/github-app` secret supplies the key. |
-| `github_pats` | object | `{}` | **Deprecated.** PATs, `{"<org>": "<token>"}`, used only for orgs the GitHub App is not installed on. A `"*"` key covers any such org without its own entry. Masked in the settings API response. |
+| `github` | object | not set | The GitHub org map: `{"orgs": {"<org>": {"auth": "app" \| "enterprise" \| "pat" \| "none", "scan": true, ...}}, "enterprise_app": {...}}`. Edited in **Settings → GitHub auth**; never returned by the settings API. Replaces `default_orgs` and `github_pats`. |
 | `dtrack_url` | string | `http://localhost:8081` | Dependency-Track API server URL. Used for all REST API calls. |
 | `dtrack_ui_url` | string | `http://localhost:8080` | Dependency-Track frontend UI URL. Used to construct deep links in Package Search. Separate from `dtrack_url` because DT ships as two Docker services on different ports. |
 | `dtrack_api_key` | string | `""` | DT API key (auto-masked in the settings UI). |
 | `gemini_api_key` | string | `""` | Google Gemini API key. Required for URL and file-upload extraction in Package Search. Auto-masked in the settings UI. Without this key the paste-list mode still works fully. |
 
-**GitHub authentication** uses one GitHub App installed on every scanned org ([docs/github-app.md](docs/github-app.md)). Locally, set `github_app_id` and `github_app_private_key_path`; in Fargate, write the `lde/github-app` secret. Orgs without the app fall back to their deprecated PAT in `github_pats`. The Settings page shows live app and per-org status via `GET /api/gh-status`.
+**GitHub authentication** is per org ([docs/github-app.md](docs/github-app.md)). Add each org in Settings and click **Create app for &lt;org&gt;**. Locally the map lives in `"github"` in `.settings.json` with each app's key in a 0600 file. In Fargate it lives in the `lde/github` secret, which LDE writes itself. There is no fallback between orgs and no `"*"` token. The Settings page shows live per-org status via `GET /api/gh-status`.
 
 ## HTTP API
 
 | Method | Path | Description |
 |---|---|---|
-| `GET`  | `/api/settings` | Returns settings with `dtrack_api_key` masked. |
-| `PUT`  | `/api/settings` | Patches whitelisted keys; rejects unknown keys with 400. |
-| `GET`  | `/api/gh-status` | Live GitHub PAT validation (`GET /user`) — used by the Settings page. |
+| `GET`  | `/api/settings` | Returns settings with `dtrack_api_key` masked; GitHub settings are left out. |
+| `PUT`  | `/api/settings` | Patches whitelisted keys; rejects unknown and GitHub keys with 400. |
+| `GET`  | `/api/gh-status` | Live per-org GitHub status (app installation tokens, PATs via `GET /user`) — used by the Settings page. |
+| `PUT`  | `/api/github/orgs/{org}` | Add or change an org in the GitHub org map: `{ "auth", "scan", "token" }`. App keys are never accepted. |
+| `DELETE` | `/api/github/orgs/{org}` | Remove an org from the GitHub org map. |
+| `POST` | `/api/gh-app/manifest` | Start **Create app for &lt;org&gt;** (GitHub's app manifest flow). |
+| `GET`  | `/api/gh-app/callback` | GitHub's redirect after the app is created; stores it server-side. |
 | `GET`  | `/api/dtrack-status` | Validate the saved DT API key against `GET /api/v1/team/self` — used by the Settings "Test DT API key" button. Returns `{ configured, ok, team, permissions, missing_permissions, message }`. |
 | `GET`  | `/api/runs` | List the 100 most recent runs. |
-| `POST` | `/api/runs` | Start a new run. Body: `{ "orgs": ["..."], "repos": ["..."], "method": "github_sbom", "use_default": true, "branch": "" }`. `orgs` defaults to `default_orgs` from settings when omitted or empty. `repos` accepts plain repo names (`"bec-api"`) or `org/repo` pairs (`"example-org/bec-api"`); when all entries use the `org/repo` format, `orgs` is derived from them and no full-org listing is done. `method` is `"github_sbom"` (the default). With `use_default: true` (or empty `branch`), every repo uses its GitHub default branch. With `use_default: false` and a non-empty `branch`, that branch is used for every repo in the run. Returns `{ "run_id": "..." }`. |
+| `POST` | `/api/runs` | Start a new run. Body: `{ "orgs": ["..."], "repos": ["..."], "method": "github_sbom", "use_default": true, "branch": "" }`. `orgs` defaults to the orgs with `scan: true` in the GitHub org map when omitted or empty. `repos` accepts plain repo names (`"bec-api"`) or `org/repo` pairs (`"example-org/bec-api"`); when all entries use the `org/repo` format, `orgs` is derived from them and no full-org listing is done. `method` is `"github_sbom"` (the default). With `use_default: true` (or empty `branch`), every repo uses its GitHub default branch. With `use_default: false` and a non-empty `branch`, that branch is used for every repo in the run. Returns `{ "run_id": "..." }`. |
 | `GET`  | `/api/runs/{id}` | Run detail: status, stage, started/completed timestamps, error, method. |
 | `GET`  | `/api/runs/{id}/repos` | Per-repo breakdown for a run. Each row includes `ort_package_count` (integer or null): the component count from GitHub's SBOM. |
 | `POST` | `/api/runs/{id}/stop` | Signal cancellation: sets the run's stop event. |
@@ -317,7 +318,9 @@ library-dependency-explorer/
 │   ├── github_client.py     # GitHub REST client with rate-limit backoff + fetch_dependency_sbom()
 │   ├── github_sbom.py       # SPDX 2.3 → CycloneDX 1.4 conversion (github_sbom pipeline)
 │   ├── gh_app.py            # GitHub App JWT + per-org installation tokens
-│   ├── gh_auth.py           # /api/gh-status: app and per-org auth status
+│   ├── gh_app_setup.py      # Create app for <org>: GitHub's app manifest flow
+│   ├── gh_config.py         # The GitHub org map: validation, migration, writes
+│   ├── gh_auth.py           # /api/gh-status: per-org auth status
 │   ├── settings.py          # .settings.json load/save with allowlist + masking
 │   ├── db.py                # SQLite WAL: runs, run_repos, manifests + orphan-detection on boot
 │   ├── task_queue.py        # ThreadPoolExecutor for background work
@@ -429,7 +432,7 @@ To start over instead, use **Restart from scratch**, which clones `orgs_json` in
 ### Verification (end-to-end smoke test)
 
 1. `docker compose up -d dtrack-apiserver dtrack-frontend` — confirm DT is up: `curl -sI http://localhost:8081/api/version`
-2. `curl -s http://127.0.0.1:8002/api/gh-status` (after step 3) — confirm `"logged_in": true` and the app is installed on each org.
+2. `curl -s http://127.0.0.1:8002/api/gh-status` (after step 3) — confirm `"logged_in": true` and `"ok": true` for each org.
 3. `python3 server.py` — server starts on http://127.0.0.1:8002.
 4. Start a single-repo run:
    ```bash
