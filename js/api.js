@@ -1,7 +1,7 @@
 async function request(method, path, body) {
   const opts = { method, headers: {} };
-  // The server refuses POST/PUT without a JSON Content-Type (CSRF guard),
-  // including body-less calls such as stop and restart.
+  // The server refuses POST/PUT/DELETE without a JSON Content-Type (CSRF guard),
+  // including body-less calls such as stop, restart and delete.
   if (method !== 'GET') opts.headers['Content-Type'] = 'application/json';
   if (body !== undefined) opts.body = JSON.stringify(body);
   const res = await fetch(path, opts);
@@ -22,6 +22,8 @@ export const api = {
   putSettings: (patch) => request('PUT', '/api/settings', patch),
   ghStatus: () => request('GET', '/api/gh-status'),
   ghAppManifest: (opts) => request('POST', '/api/gh-app/manifest', opts),
+  putGithubOrg: (org, body) => request('PUT', `/api/github/orgs/${encodeURIComponent(org)}`, body),
+  deleteGithubOrg: (org) => request('DELETE', `/api/github/orgs/${encodeURIComponent(org)}`),
   dtrackStatus: () => request('GET', '/api/dtrack-status'),
   geminiStatus: () => request('GET', '/api/gemini-status'),
 

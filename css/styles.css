@@ -85,10 +85,14 @@ th { color: #9aa4b2; font-weight: 500; }
 
 .muted { color: #9aa4b2; font-size: 13px; }
 
-.pat-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
-.pat-row .pat-org { flex: 1 1 140px; width: auto; }
-.pat-row .pat-token { flex: 3 1 240px; width: auto; }
-.pat-row.removed .pat-org, .pat-row.removed .pat-token { opacity: 0.4; text-decoration: line-through; }
+/* Settings -> GitHub auth org table */
+.gh-org-table .gh-auth { max-width: 180px; }
+.gh-org-table .gh-token { display: block; margin-top: 6px; width: 100%; max-width: 260px; box-sizing: border-box; }
+.gh-org-table .gh-token[hidden] { display: none; }
+.gh-org-table .gh-actions { white-space: nowrap; }
+.gh-org-table .gh-actions button { margin: 2px 4px 2px 0; }
+.gh-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.gh-add input { flex: 0 1 220px; width: auto; }
 #pkg-count { margin-left: 12px; }
 .pkg-count-num { color: #fff; font-weight: 700; }
 .pager { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
@@ -215,8 +219,6 @@ button.primary:hover { background: #1e4dcc; }
   align-items: center;
 }
 .branch-discovery-form input[type="text"] { width: auto; flex: 1 1 180px; }
-.gh-orgs { list-style: none; padding-left: 0; margin: 8px 0; }
-.gh-orgs li { margin-bottom: 4px; }
 #pat-section { margin-bottom: 12px; }
 #pat-section summary { cursor: pointer; margin-bottom: 8px; }
 #gh-app-create { margin-top: 12px; }

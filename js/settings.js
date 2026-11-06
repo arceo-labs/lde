@@ -4,9 +4,11 @@ import { api } from '/js/api.js';
 // image — safe under the page's img-less CSP.
 const LOCK_ICON = '<span class="secret-icon" title="Secret — masked, write-only">🔒</span>';
 
-const KEY_SOURCE_LABEL = {
-  file: 'loaded from github_app_private_key_path',
-  secrets_manager: 'loaded from the lde/github-app secret',
+const AUTH_LABEL = {
+  app: 'own GitHub App',
+  enterprise: 'enterprise app',
+  pat: 'PAT (deprecated)',
+  none: 'none',
 };
 
 // Fixed reasons the setup callback can redirect back with (?gh_app_error=<reason>).
@@ -14,14 +16,14 @@ const SETUP_ERRORS = {
   state: 'The setup link was unknown, already used or expired. Start again.',
   exchange: 'GitHub did not hand over the new app. The code is single-use and expires after an hour: start again.',
   store: 'LDE could not store the new app\'s private key. Check the server log, then start again.',
-  exists: 'That org already has a GitHub App in LDE, so the new one was not saved. Delete the unused app on GitHub.',
-  config: 'The GitHub App configuration is broken, so the new app was not saved. Fix it (see the card), then delete the unused app on GitHub and start again.',
+  exists: 'That org already has its own GitHub App in LDE, so the new one was not saved. Delete the unused app on GitHub.',
+  config: 'The GitHub config is broken, so the new app was not saved. Fix it (see the card), then delete the unused app on GitHub and start again.',
 };
 
-function createAppHtml() {
-  return `<details id="gh-app-create">
-    <summary>Create a GitHub App for another org</summary>
-    <p class="muted hint">GitHub creates a private, read-only app (Contents and Metadata) owned by the org, with no webhook. LDE stores its private key on the server; the key never reaches this page. Only an owner of the org can create it. Several orgs in one GitHub Enterprise? You can instead add one enterprise-owned app by hand (docs/github-app.md).</p>
+function createAppHtml(open = false) {
+  return `<details id="gh-app-create"${open ? ' open' : ''}>
+    <summary>Create a GitHub App for an org not listed yet</summary>
+    <p class="muted hint">GitHub creates a private, read-only app (Contents and Metadata) owned by the org, with no webhook, and LDE adds the org with scan on. LDE stores the app's private key on the server; the key never reaches this page. Only an owner of the org can create it. Several orgs in one GitHub Enterprise? You can instead add one enterprise-owned app by hand (docs/github-app.md).</p>
     <p><label>Org (blank = your personal account)<br>
        <input id="ga-org" type="text" maxlength="39" autocomplete="off" placeholder="my-org"></label></p>
     <p><label>App name (must be unique on GitHub; blank picks one)<br>
@@ -92,56 +94,161 @@ function safeInstallUrl(app) {
     ? app.install_url : '';
 }
 
-function appRowHtml(app) {
-  const tag = app.ok ? '<span class="tag ok">app</span>' : '<span class="tag fail">app</span>';
-  const name = app.name || app.slug || `App ${app.app_id}`;
-  const owner = app.owner ? ` <span class="muted">owned by ${escapeHtml(app.owner)}</span>` : '';
-  const src = KEY_SOURCE_LABEL[app.key_source] ? ` <span class="muted">(key ${KEY_SOURCE_LABEL[app.key_source]})</span>` : '';
-  const url = app.ok ? safeInstallUrl(app) : '';
+function authOptions(row, enterprise) {
+  const kinds = ['pat', 'none'];
+  if (enterprise || row.auth === 'enterprise') kinds.unshift('enterprise');
+  if (row.auth === 'app') kinds.unshift('app');  // an app is only ever created, never picked
+  return kinds.map((k) => `<option value="${k}"${k === row.auth ? ' selected' : ''}>${escapeHtml(AUTH_LABEL[k])}</option>`).join('');
+}
+
+function orgRowHtml(row, enterprise) {
+  const org = escapeHtml(row.org);
+  const cls = !row.ok ? 'fail' : row.auth === 'pat' ? 'warn' : 'ok';
+  const status = `<span class="tag ${cls}">${row.ok ? 'ok' : row.auth === 'none' ? 'not set up' : 'failed'}</span> ${escapeHtml(row.message)}${row.user ? ` <span class="muted">as ${escapeHtml(row.user)}</span>` : ''}`;
+  const url = (row.auth === 'app' || row.auth === 'enterprise') ? safeInstallUrl(row) : '';
+  const manage = url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Manage on GitHub</a>` : '';
+  const create = row.auth !== 'app'
+    ? `<button type="button" class="secondary ga-create-org" data-org="${org}">Create app for ${org}</button><span class="muted"></span>`
+    : '';
+  const tokenPlaceholder = row.token_hint ? `${row.token_hint} (saved — type to replace)` : 'github_pat_…';
+  return `<tr class="gh-org-row" data-org="${org}" data-auth="${escapeHtml(row.auth)}">
+    <td>${org}</td>
+    <td><select class="gh-auth" aria-label="Auth for ${org}">${authOptions(row, enterprise)}</select>
+        <input class="gh-token" type="password" autocomplete="off" aria-label="PAT for ${org}" placeholder="${escapeHtml(tokenPlaceholder)}"${row.auth === 'pat' ? '' : ' hidden'}></td>
+    <td><input class="gh-scan" type="checkbox" aria-label="Scan ${org} by default"${row.scan ? ' checked' : ''}></td>
+    <td>${status}</td>
+    <td class="gh-actions"><button type="button" class="gh-save">Save</button>
+        <button type="button" class="secondary gh-remove">Remove</button>
+        ${manage} ${create}<span class="muted gh-row-status"></span></td>
+  </tr>`;
+}
+
+function enterpriseHtml(ent) {
+  if (!ent) return '';
+  const tag = ent.ok ? '<span class="tag ok">enterprise app</span>' : '<span class="tag fail">enterprise app</span>';
+  const url = ent.ok ? safeInstallUrl(ent) : '';
   const manage = url ? ` · <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Manage on GitHub</a>` : '';
-  const msg = app.ok ? '' : ` ${escapeHtml(app.message)}`;
-  return `<li>${tag} ${escapeHtml(name)}${owner}${src}${manage}${msg}</li>`;
+  return `<p>${tag} ${escapeHtml(ent.name || `App ${ent.app_id}`)} <span class="muted">for enterprise ${escapeHtml(ent.enterprise)}</span>${manage} ${ent.ok ? '' : escapeHtml(ent.message)}</p>`;
+}
+
+const SOURCE_LABEL = {
+  secret: 'the lde/github secret',
+  file: '"github" in .settings.json',
+  legacy: 'the old settings keys (saving any org moves them)',
+};
+
+async function saveOrgRow(tr, btn) {
+  const out = tr.querySelector('.gh-row-status');
+  const auth = tr.querySelector('.gh-auth').value;
+  // Leaving the org's own app drops its App ID and key from LDE; getting it back
+  // means creating a new app. Ask for a second click.
+  if (tr.dataset.auth === 'app' && auth !== 'app' && !btn.dataset.armed) {
+    btn.dataset.armed = '1';
+    btn.textContent = 'Click again: this drops the org\'s app';
+    return;
+  }
+  const body = { auth, scan: tr.querySelector('.gh-scan').checked };
+  const token = tr.querySelector('.gh-token').value.trim();
+  if (auth === 'pat' && token) body.token = token;
+  out.textContent = 'Saving…';
+  try {
+    await api.putGithubOrg(tr.dataset.org, body);
+    await refreshGhStatus();
+  } catch (err) {
+    out.textContent = `Failed: ${err.message}`;  // textContent: server text, never HTML
+  }
+}
+
+async function removeOrgRow(tr, btn) {
+  if (!btn.dataset.armed) {
+    btn.dataset.armed = '1';
+    btn.textContent = 'Click again to remove';
+    return;
+  }
+  const out = tr.querySelector('.gh-row-status');
+  try {
+    await api.deleteGithubOrg(tr.dataset.org);
+    await refreshGhStatus();
+  } catch (err) {
+    out.textContent = `Failed: ${err.message}`;
+  }
+}
+
+function wireOrgTable() {
+  for (const tr of document.querySelectorAll('.gh-org-row')) {
+    const select = tr.querySelector('.gh-auth');
+    select.addEventListener('change', () => {
+      tr.querySelector('.gh-token').hidden = select.value !== 'pat';
+    });
+    const save = tr.querySelector('.gh-save');
+    save.addEventListener('click', () => saveOrgRow(tr, save));
+    const rm = tr.querySelector('.gh-remove');
+    rm.addEventListener('click', () => removeOrgRow(tr, rm));
+  }
+  const add = document.getElementById('gh-add-org');
+  if (add) {
+    add.addEventListener('click', async () => {
+      const input = document.getElementById('gh-new-org');
+      const out = document.getElementById('gh-add-status');
+      const org = input.value.trim();
+      if (!org) return;
+      out.textContent = 'Adding…';
+      try {
+        await api.putGithubOrg(org, {});
+        await refreshGhStatus();
+      } catch (err) {
+        out.textContent = `Failed: ${err.message}`;
+      }
+    });
+  }
+  const refresh = document.getElementById('gh-refresh');
+  if (refresh) refresh.addEventListener('click', () => refreshGhStatus());
+}
+
+async function refreshGhStatus() {
+  const ghEl = document.getElementById('gh-status');
+  try {
+    renderGhStatusCard(await api.ghStatus());
+  } catch (err) {
+    if (ghEl) ghEl.innerHTML = `<p><span class="tag fail">error</span> ${escapeHtml(err.message)}</p>`;
+  }
 }
 
 function renderGhStatusCard(gh) {
   const ghEl = document.getElementById('gh-status');
   if (!ghEl) return;
-  const notice = gh.notice ? `<p><span class="tag warn">deprecated config</span> ${escapeHtml(gh.notice)}</p>` : '';
-  if (!gh.installed) {
+  const notice = gh.notice ? `<p><span class="tag warn">notice</span> ${escapeHtml(gh.notice)}</p>` : '';
+  const refresh = '<button id="gh-refresh" type="button" class="secondary">Check again</button>';
+  if (gh.config_error) {
     ghEl.innerHTML = `${setupResult}${notice}
-      <p><span class="tag fail">not configured</span> ${escapeHtml(gh.raw || '')}</p>
-      ${createAppHtml().replace('<details id="gh-app-create">', '<details id="gh-app-create" open>').replace('for another org', 'for your org')}
-    `;
-    wireCreateApp();
+      <p><span class="tag fail">GitHub config broken</span> ${escapeHtml(gh.config_error)}</p>
+      <p class="muted hint">Every GitHub call fails until this is fixed in ${gh.source === 'secret' ? 'the lde/github secret' : '.settings.json'} (docs/github-app.md). ${refresh}</p>`;
+    wireOrgTable();
     return;
   }
-  const apps = gh.apps || [];
-  const appsError = gh.apps_error
-    ? `<p><span class="tag fail">GitHub App config</span> ${escapeHtml(gh.apps_error)}</p>` : '';
-  const appList = apps.length
-    ? `<p><strong>GitHub Apps</strong></p><ul class="gh-orgs">${apps.map(appRowHtml).join('')}</ul>`
-    : '<p><span class="tag warn">no GitHub App</span> Using PATs only (deprecated).</p>';
-  const rows = (gh.accounts || []).map((a) => {
-    const label = a.org === '*' ? 'all other orgs (*)' : a.org;
-    const via = a.via === 'app' ? (a.app ? `app: ${a.app}` : 'app') : a.via === 'pat' ? 'PAT' : 'none';
-    const cls = !a.ok ? 'fail' : a.via === 'pat' ? 'warn' : 'ok';
-    // An org without an app gets its own private app through the manifest flow.
-    const create = (a.org !== '*' && a.via !== 'app' && !gh.apps_error)
-      ? ` <button type="button" class="secondary ga-create-org" data-org="${escapeHtml(a.org)}">Create app for ${escapeHtml(a.org)}</button><span class="muted"></span>`
-      : '';
-    return `<li><span class="tag ${cls}">${escapeHtml(via)}</span> ${escapeHtml(label)}${a.user ? ` <span class="muted">as ${escapeHtml(a.user)}</span>` : ''}${create}</li>`;
-  }).join('');
-  const overall = gh.logged_in
-    ? '<span class="tag ok">authenticated</span>'
-    : '<span class="tag fail">authentication incomplete</span>';
+  const orgs = gh.orgs || [];
+  const overall = !gh.installed
+    ? '<span class="tag fail">not configured</span>'
+    : gh.logged_in ? '<span class="tag ok">authenticated</span>'
+      : '<span class="tag fail">authentication incomplete</span>';
+  const source = SOURCE_LABEL[gh.source] ? ` <span class="muted">Orgs are stored in ${escapeHtml(SOURCE_LABEL[gh.source])}.</span>` : '';
+  const table = orgs.length
+    ? `<div class="table-scroll"><table class="data-table gh-org-table">
+        <thead><tr><th>Org</th><th>Auth</th><th>Scan</th><th>Status</th><th></th></tr></thead>
+        <tbody>${orgs.map((o) => orgRowHtml(o, gh.enterprise_app)).join('')}</tbody>
+      </table></div>`
+    : `<p class="muted">${escapeHtml(gh.raw || '')}</p>`;
   ghEl.innerHTML = `${setupResult}${notice}
-    <p>${overall}</p>
-    ${appsError}
-    ${appList}
-    ${rows ? `<p><strong>Orgs</strong></p><ul class="gh-orgs">${rows}</ul>` : ''}
-    <pre class="log">${escapeHtml(gh.raw)}</pre>
-    ${gh.apps_error ? '' : createAppHtml()}
+    <p>${overall} ${refresh}${source}</p>
+    ${enterpriseHtml(gh.enterprise_app)}
+    ${table}
+    <p class="muted hint"><strong>Scan</strong> puts the org in runs that name no orgs. <strong>Create app for &lt;org&gt;</strong> makes a private read-only app owned by that org and switches the org to it. PATs are deprecated: one fine-grained token per org, write-only.</p>
+    <p class="gh-add"><input id="gh-new-org" type="text" maxlength="39" autocomplete="off" aria-label="New org name" placeholder="org name">
+       <button id="gh-add-org" type="button" class="secondary">Add org</button>
+       <span id="gh-add-status" class="muted"></span></p>
+    ${createAppHtml(!orgs.length)}
   `;
+  wireOrgTable();
   wireCreateApp();
 }
 
@@ -158,12 +265,9 @@ export async function renderSettings(root) {
     </div>
   `;
 
-  // The status card checks the app and every org against GitHub, which can be slow:
-  // load it in the background so it never blocks the form.
-  api.ghStatus().then(renderGhStatusCard).catch((err) => {
-    const ghEl = document.getElementById('gh-status');
-    if (ghEl) ghEl.innerHTML = `<p><span class="tag fail">error</span> ${escapeHtml(err.message)}</p>`;
-  });
+  // The status card checks every org against GitHub, which can be slow: load it in
+  // the background so it never blocks the form.
+  refreshGhStatus();
 
   let settings;
   try {
@@ -174,23 +278,7 @@ export async function renderSettings(root) {
     return;
   }
   const formEl = document.getElementById('settings-form');
-  const patCount = Object.keys(settings.github_pats || {}).length;
   formEl.innerHTML = `
-    <div id="app-section">
-      <p><button id="test-gh" type="button">Test GitHub Apps</button>
-         <span id="gh-test-status" class="muted"></span>
-         <br><span class="muted hint">Checks every GitHub App and which app or PAT covers each org, and refreshes the card above. Apps are created from the card; an app added by hand goes in <code>github_apps</code> in <code>.settings.json</code> or the <code>lde/github-app</code> secret (docs/github-app.md).</span></p>
-    </div>
-    <details id="pat-section"${patCount ? ' open' : ''}>
-      <summary>Legacy PATs (deprecated, ${patCount} saved)</summary>
-      <p>${LOCK_ICON} Used only for orgs the GitHub App is not installed on — one fine-grained token per org (masked, write-only)</p>
-      <div id="pat-rows">${Object.entries(settings.github_pats || {}).map(([org, masked]) => patRowHtml(org, masked)).join('')}</div>
-      <p><button id="pat-add" type="button" class="secondary">Add org</button>
-         <button id="pat-add-all" type="button" class="secondary">Add token for all other orgs</button>
-         <span class="muted hint">The <code>*</code> row is used for any org without its own row and without the GitHub App. Leave a saved row's token blank to keep it; type to replace it.</span></p>
-    </details>
-    <p><label>Default orgs (comma separated)<br>
-       <input id="s-orgs" type="text" value="${(settings.default_orgs || []).join(',')}"></label></p>
     <p><label>Dependency-Track API URL (used for API calls)<br>
        <input id="s-dturl" type="text" value="${escapeHtml(settings.dtrack_url || '')}"></label></p>
     <p><label>Dependency-Track UI URL (used for deep links in Package Search)<br>
@@ -223,50 +311,6 @@ export async function renderSettings(root) {
        <input id="s-net" type="text" value="${escapeHtml(settings.ort_egress_network || '')}"></label></p>
     <p><button id="save">Save</button> <span id="save-status" class="muted"></span></p>
   `;
-
-  const patRows = document.getElementById('pat-rows');
-  document.getElementById('pat-add').addEventListener('click', () => {
-    patRows.insertAdjacentHTML('beforeend', patRowHtml('', ''));
-    patRows.lastElementChild.querySelector('.pat-org').focus();
-  });
-  document.getElementById('pat-add-all').addEventListener('click', () => {
-    const existing = [...patRows.querySelectorAll('.pat-org')].find((el) => el.value.trim() === '*');
-    if (existing) {
-      existing.closest('.pat-row').querySelector('.pat-token').focus();
-      return;
-    }
-    patRows.insertAdjacentHTML('beforeend', patRowHtml('*', '', true));
-    patRows.lastElementChild.querySelector('.pat-token').focus();
-  });
-  patRows.addEventListener('click', async (ev) => {
-    const row = ev.target.closest('.pat-row');
-    if (!row) return;
-    if (ev.target.classList.contains('pat-remove')) {
-      if (row.dataset.saved) {
-        row.classList.toggle('removed');
-        ev.target.textContent = row.classList.contains('removed') ? 'Undo' : 'Remove';
-      } else {
-        row.remove();
-      }
-    }
-  });
-
-  document.getElementById('test-gh').addEventListener('click', async () => {
-    const status = document.getElementById('gh-test-status');
-    status.innerHTML = 'Testing…';
-    try {
-      const r = await api.ghStatus();
-      renderGhStatusCard(r);
-      const summary = escapeHtml(r.raw).replace(/\n/g, ' · ');
-      if (r.installed && r.logged_in) {
-        status.innerHTML = `<span class="tag ok">authenticated</span> ${summary}`;
-      } else {
-        status.innerHTML = `<span class="tag fail">${r.installed ? 'failed' : 'not configured'}</span> ${summary}`;
-      }
-    } catch (err) {
-      status.innerHTML = `<span class="tag fail">error</span> ${escapeHtml(err.message)}`;
-    }
-  });
 
   document.getElementById('test-gemini').addEventListener('click', async () => {
     const status = document.getElementById('gemini-status');
@@ -304,34 +348,11 @@ export async function renderSettings(root) {
 
   document.getElementById('save').addEventListener('click', async () => {
     const patch = {
-      default_orgs: document.getElementById('s-orgs').value.split(',').map((s) => s.trim()).filter(Boolean),
       dtrack_url: document.getElementById('s-dturl').value.trim(),
       dtrack_ui_url: document.getElementById('s-dtuiurl').value.trim(),
       ort_image: document.getElementById('s-ort').value.trim(),
       ort_egress_network: document.getElementById('s-net').value.trim(),
     };
-    const pats = {};
-    const incomplete = [];
-    for (const row of patRows.querySelectorAll('.pat-row')) {
-      const org = row.querySelector('.pat-org').value.trim();
-      const token = row.querySelector('.pat-token').value.trim();
-      if (row.classList.contains('removed')) {
-        if (org) pats[org] = '';
-      } else if (token && !org) {
-        incomplete.push('a token has no org name');
-      } else if (org && !token && !row.dataset.saved) {
-        incomplete.push(`${org} has no token`);
-      } else if (org && token) {
-        pats[org] = token;
-      }
-    }
-    if (incomplete.length) {
-      // textContent, not innerHTML: org names are user input.
-      document.getElementById('save-status').textContent =
-        `Not saved: ${incomplete.join('; ')}. Fill in both fields or remove the row.`;
-      return;
-    }
-    if (Object.keys(pats).length) patch.github_pats = pats;
     const newKey = document.getElementById('s-dtkey').value;
     if (newKey) patch.dtrack_api_key = newKey;
     const newGeminiKey = document.getElementById('s-gemini').value;
@@ -348,16 +369,6 @@ export async function renderSettings(root) {
       status.textContent = `Failed: ${err.message}`;
     }
   });
-}
-
-function patRowHtml(org, masked, isNew = false) {
-  const saved = Boolean(org) && !isNew;
-  const title = org === '*' ? ' title="Used for any org without its own row"' : '';
-  return `<div class="pat-row"${saved ? ' data-saved="1"' : ''}>
-    <input class="pat-org" type="text" aria-label="GitHub org" placeholder="org name" autocomplete="off" value="${escapeHtml(org)}"${title}${org ? ' readonly' : ''}>
-    <input class="pat-token" type="password" aria-label="${escapeHtml(org ? `Token for ${org}` : 'GitHub token')}" autocomplete="off" placeholder="${escapeHtml(saved ? `${masked} (saved — type to replace)` : 'github_pat_…')}">
-    <button type="button" class="secondary pat-remove">Remove</button>
-  </div>`;
 }
 
 function escapeHtml(s) {
