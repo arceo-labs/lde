@@ -144,7 +144,9 @@ def auth_status():
     try:
         conf = gh_config.load()
     except gh_config.ConfigError as exc:
+        # Name the place to fix: on AWS that is always lde/github, never .settings.json.
         return dict(empty, installed=True, config_error=str(exc),
+                    source='secret' if gh_config._aws() else 'file',
                     raw=f'GitHub config: {exc}', notice=' '.join(notices))
     notices.extend(conf['notices'])
     if not conf['orgs'] and not conf['enterprise_app']:

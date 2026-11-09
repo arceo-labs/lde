@@ -308,6 +308,42 @@ def test_key_file_symlink_is_not_followed(env, github):
     assert not target.exists()
 
 
+def test_unwritable_key_dir_is_a_store_error(env, github, monkeypatch):
+    def boom(*a, **kw):
+        raise PermissionError(13, 'Permission denied')
+    monkeypatch.setattr(gh_app_setup.os, 'makedirs', boom)
+    with pytest.raises(gh_app_setup.SetupError) as exc:
+        gh_app_setup.complete('code', _start()['state'])
+    assert exc.value.reason == 'store'
+    assert 'github' not in json.loads((env / 'settings.json').read_text())
+
+
+def test_failed_key_write_leaves_no_partial_file(env, github, monkeypatch):
+    real_fdopen = os.fdopen
+
+    class Full:
+        def __init__(self, fd, mode):
+            self.f = real_fdopen(fd, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.f.close()
+
+        def write(self, data):
+            self.f.write(data[:10])
+            self.f.flush()
+            raise OSError(28, 'No space left on device')
+
+    monkeypatch.setattr(gh_app_setup.os, 'fdopen', Full)
+    with pytest.raises(gh_app_setup.SetupError) as exc:
+        gh_app_setup.complete('code', _start()['state'])
+    assert exc.value.reason == 'store'
+    assert list((env / 'lde').iterdir()) == []
+    assert 'github' not in json.loads((env / 'settings.json').read_text())
+
+
 def _aws(monkeypatch, current='REPLACE_ME', pats='REPLACE_ME', **legacy):
     monkeypatch.setenv('LDE_SECRETS_SOURCE', 'aws')
     monkeypatch.setattr(settings_mod, 'load_settings', lambda: dict(settings_mod.DEFAULTS, **legacy))

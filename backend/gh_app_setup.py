@@ -182,10 +182,10 @@ def _convert(code):
 def _write_key_file(app_id, pem):
     """Write *pem* to a new owner-only file under ~/.lde; return its path."""
     key_dir = os.path.realpath(os.path.expanduser(_KEY_DIR))
-    os.makedirs(key_dir, mode=0o700, exist_ok=True)
     path = os.path.join(key_dir, f'github-app-{app_id}.pem')
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
     try:
+        os.makedirs(key_dir, mode=0o700, exist_ok=True)
         fd = os.open(path, flags, 0o600)
     except FileExistsError:
         raise SetupError('store', f'{_KEY_DIR}/github-app-{app_id}.pem already exists. '
@@ -193,8 +193,19 @@ def _write_key_file(app_id, pem):
     except OSError as exc:
         raise SetupError('store', f'Could not create the key file in {_KEY_DIR}: '
                                   f'{exc.strerror or type(exc).__name__}') from None
-    with os.fdopen(fd, 'w') as f:
-        f.write(pem)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(pem)
+    except BaseException as exc:
+        # The file is ours (O_EXCL): never leave a partial key behind.
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        if isinstance(exc, OSError):
+            raise SetupError('store', f'Could not write the key file in {_KEY_DIR}: '
+                                      f'{exc.strerror or type(exc).__name__}') from None
+        raise
     return path
 
 

@@ -402,6 +402,20 @@ def test_auth_status_reports_broken_config_without_raising():
     assert 'needs a token' in st['config_error']
 
 
+def test_auth_status_config_error_names_the_aws_secret(monkeypatch):
+    monkeypatch.setenv('LDE_SECRETS_SOURCE', 'aws')
+    with _cfg(github_secret_error='lde/github is not valid JSON.'):
+        st = gh_auth.auth_status()
+    assert st['config_error'] and st['source'] == 'secret'
+
+
+def test_auth_status_config_error_locally_names_the_file(monkeypatch):
+    monkeypatch.delenv('LDE_SECRETS_SOURCE', raising=False)
+    with _cfg(github={'orgs': {'acme': {'auth': 'pat'}}}):
+        st = gh_auth.auth_status()
+    assert st['config_error'] and st['source'] == 'file'
+
+
 def test_auth_status_with_nothing_configured():
     with _cfg():
         st = gh_auth.auth_status()
