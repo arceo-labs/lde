@@ -28,14 +28,28 @@ function createAppHtml(open = false) {
        <input id="ga-org" type="text" maxlength="39" autocomplete="off" placeholder="my-org"></label></p>
     <p><label>App name (must be unique on GitHub; blank picks one)<br>
        <input id="ga-name" type="text" maxlength="34" autocomplete="off" placeholder="LDE my-org"></label></p>
-    <p><button id="ga-create" type="button">Create GitHub App on GitHub</button>
-       <span id="ga-status" class="muted"></span></p>
+    <p><button id="ga-create" type="button">Create GitHub App on GitHub</button></p>
+    <div id="ga-status" class="status-msg" role="status"></div>
   </details>`;
+}
+
+// Show a status or error message under the control that caused it. textContent
+// only: messages are server text, never HTML. Inside an org table, the message
+// lives in its own full-width row, shown only while it has text.
+function showStatus(el, text, isError = false) {
+  el.textContent = text;
+  el.classList.toggle('is-error', isError);
+  const row = el.closest('.gh-msg-row');
+  if (row) row.hidden = !text;
+}
+
+function rowStatus(tr) {
+  return tr.nextElementSibling.querySelector('.gh-row-status');
 }
 
 // Start GitHub's manifest flow: LDE returns the manifest, the browser form-posts it to github.com.
 async function createApp(org, name, statusEl) {
-  statusEl.textContent = 'Preparing…';
+  showStatus(statusEl, 'Preparing…');
   try {
     const r = await api.ghAppManifest({ org, name });
     if (typeof r.action !== 'string' || !r.action.startsWith('https://github.com/')) {
@@ -53,7 +67,7 @@ async function createApp(org, name, statusEl) {
     document.body.append(form);
     form.submit();
   } catch (err) {
-    statusEl.textContent = `Failed: ${err.message}`;
+    showStatus(statusEl, `Failed: ${err.message}`, true);
   }
 }
 
@@ -66,7 +80,7 @@ function wireCreateApp() {
       document.getElementById('ga-status')));
   }
   for (const el of document.querySelectorAll('.ga-create-org')) {
-    el.addEventListener('click', () => createApp(el.dataset.org, '', el.nextElementSibling));
+    el.addEventListener('click', () => createApp(el.dataset.org, '', rowStatus(el.closest('tr'))));
   }
 }
 
@@ -104,23 +118,24 @@ function authOptions(row, enterprise) {
 function orgRowHtml(row, enterprise) {
   const org = escapeHtml(row.org);
   const cls = !row.ok ? 'fail' : row.auth === 'pat' ? 'warn' : 'ok';
-  const status = `<span class="tag ${cls}">${row.ok ? 'ok' : row.auth === 'none' ? 'not set up' : 'failed'}</span> ${escapeHtml(row.message)}${row.user ? ` <span class="muted">as ${escapeHtml(row.user)}</span>` : ''}`;
+  const status = `<span class="tag ${cls}">${row.ok ? 'ok' : row.auth === 'none' ? 'not set up' : 'failed'}</span><span class="gh-msg">${escapeHtml(row.message)}${row.user ? ` <span class="muted">as ${escapeHtml(row.user)}</span>` : ''}</span>`;
   const url = (row.auth === 'app' || row.auth === 'enterprise') ? safeInstallUrl(row) : '';
   const manage = url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Manage on GitHub</a>` : '';
   const create = row.auth !== 'app'
-    ? `<button type="button" class="secondary ga-create-org" data-org="${org}">Create app for ${org}</button><span class="muted"></span>`
+    ? `<button type="button" class="secondary ga-create-org" data-org="${org}">Create app for ${org}</button>`
     : '';
-  const tokenPlaceholder = row.token_hint ? `${row.token_hint} (saved — type to replace)` : 'github_pat_…';
+  const tokenPlaceholder = row.token_hint ? `${row.token_hint} (saved)` : 'github_pat_…';
   return `<tr class="gh-org-row" data-org="${org}" data-auth="${escapeHtml(row.auth)}">
-    <td>${org}</td>
-    <td><select class="gh-auth" aria-label="Auth for ${org}">${authOptions(row, enterprise)}</select>
-        <input class="gh-token" type="password" autocomplete="off" aria-label="PAT for ${org}" placeholder="${escapeHtml(tokenPlaceholder)}"${row.auth === 'pat' ? '' : ' hidden'}></td>
-    <td><input class="gh-scan" type="checkbox" aria-label="Scan ${org} by default"${row.scan ? ' checked' : ''}></td>
-    <td>${status}</td>
-    <td class="gh-actions"><button type="button" class="gh-save">Save</button>
+    <td class="gh-org">${org}</td>
+    <td class="gh-auth-cell" data-label="Auth"><select class="gh-auth" aria-label="Auth for ${org}">${authOptions(row, enterprise)}</select>
+        <input class="gh-token" type="password" autocomplete="off" aria-label="PAT for ${org}" title="Type a new token to replace the saved one" placeholder="${escapeHtml(tokenPlaceholder)}"${row.auth === 'pat' ? '' : ' hidden'}></td>
+    <td class="gh-scan-cell" data-label="Scan"><input class="gh-scan" type="checkbox" aria-label="Scan ${org} by default"${row.scan ? ' checked' : ''}></td>
+    <td class="gh-status-cell" data-label="Status">${status}</td>
+    <td class="gh-actions"><div class="gh-actions-inner"><button type="button" class="gh-save">Save</button>
         <button type="button" class="secondary gh-remove">Remove</button>
-        ${manage} ${create}<span class="muted gh-row-status"></span></td>
-  </tr>`;
+        ${manage} ${create}</div></td>
+  </tr>
+  <tr class="gh-msg-row" hidden><td colspan="5"><div class="status-msg gh-row-status" role="status"></div></td></tr>`;
 }
 
 function enterpriseHtml(ent) {
@@ -138,7 +153,7 @@ const SOURCE_LABEL = {
 };
 
 async function saveOrgRow(tr, btn) {
-  const out = tr.querySelector('.gh-row-status');
+  const out = rowStatus(tr);
   const auth = tr.querySelector('.gh-auth').value;
   // Leaving the org's own app drops its App ID and key from LDE; getting it back
   // means creating a new app. Ask for a second click.
@@ -150,12 +165,12 @@ async function saveOrgRow(tr, btn) {
   const body = { auth, scan: tr.querySelector('.gh-scan').checked };
   const token = tr.querySelector('.gh-token').value.trim();
   if (auth === 'pat' && token) body.token = token;
-  out.textContent = 'Saving…';
+  showStatus(out, 'Saving…');
   try {
     await api.putGithubOrg(tr.dataset.org, body);
     await refreshGhStatus();
   } catch (err) {
-    out.textContent = `Failed: ${err.message}`;  // textContent: server text, never HTML
+    showStatus(out, `Failed: ${err.message}`, true);
   }
 }
 
@@ -165,12 +180,12 @@ async function removeOrgRow(tr, btn) {
     btn.textContent = 'Click again to remove';
     return;
   }
-  const out = tr.querySelector('.gh-row-status');
+  const out = rowStatus(tr);
   try {
     await api.deleteGithubOrg(tr.dataset.org);
     await refreshGhStatus();
   } catch (err) {
-    out.textContent = `Failed: ${err.message}`;
+    showStatus(out, `Failed: ${err.message}`, true);
   }
 }
 
@@ -192,12 +207,12 @@ function wireOrgTable() {
       const out = document.getElementById('gh-add-status');
       const org = input.value.trim();
       if (!org) return;
-      out.textContent = 'Adding…';
+      showStatus(out, 'Adding…');
       try {
         await api.putGithubOrg(org, {});
         await refreshGhStatus();
       } catch (err) {
-        out.textContent = `Failed: ${err.message}`;
+        showStatus(out, `Failed: ${err.message}`, true);
       }
     });
   }
@@ -217,7 +232,7 @@ async function refreshGhStatus() {
 function renderGhStatusCard(gh) {
   const ghEl = document.getElementById('gh-status');
   if (!ghEl) return;
-  const notice = gh.notice ? `<p><span class="tag warn">notice</span> ${escapeHtml(gh.notice)}</p>` : '';
+  const notice = gh.notice ? `<div class="callout warn"><span class="tag warn">notice</span> ${escapeHtml(gh.notice)}</div>` : '';
   const refresh = '<button id="gh-refresh" type="button" class="secondary">Check again</button>';
   if (gh.config_error) {
     ghEl.innerHTML = `${setupResult}${notice}
@@ -231,7 +246,7 @@ function renderGhStatusCard(gh) {
     ? '<span class="tag fail">not configured</span>'
     : gh.logged_in ? '<span class="tag ok">authenticated</span>'
       : '<span class="tag fail">authentication incomplete</span>';
-  const source = SOURCE_LABEL[gh.source] ? ` <span class="muted">Orgs are stored in ${escapeHtml(SOURCE_LABEL[gh.source])}.</span>` : '';
+  const source = SOURCE_LABEL[gh.source] ? `<span class="muted">Orgs are stored in ${escapeHtml(SOURCE_LABEL[gh.source])}.</span>` : '';
   const table = orgs.length
     ? `<div class="table-scroll"><table class="data-table gh-org-table">
         <thead><tr><th>Org</th><th>Auth</th><th>Scan</th><th>Status</th><th></th></tr></thead>
@@ -239,13 +254,13 @@ function renderGhStatusCard(gh) {
       </table></div>`
     : `<p class="muted">${escapeHtml(gh.raw || '')}</p>`;
   ghEl.innerHTML = `${setupResult}${notice}
-    <p>${overall} ${refresh}${source}</p>
+    <div class="gh-toolbar">${overall} ${refresh} ${source}</div>
     ${enterpriseHtml(gh.enterprise_app)}
     ${table}
     <p class="muted hint"><strong>Scan</strong> puts the org in runs that name no orgs. <strong>Create app for &lt;org&gt;</strong> makes a private read-only app owned by that org and switches the org to it. PATs are deprecated: one fine-grained token per org, write-only.</p>
     <p class="gh-add"><input id="gh-new-org" type="text" maxlength="39" autocomplete="off" aria-label="New org name" placeholder="org name">
-       <button id="gh-add-org" type="button" class="secondary">Add org</button>
-       <span id="gh-add-status" class="muted"></span></p>
+       <button id="gh-add-org" type="button" class="secondary">Add org</button></p>
+    <div id="gh-add-status" class="status-msg" role="status"></div>
     ${createAppHtml(!orgs.length)}
   `;
   wireOrgTable();
