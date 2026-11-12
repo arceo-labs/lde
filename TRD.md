@@ -8,7 +8,7 @@
 ### 2. System Architecture Components
 
 * **Component A: The Fetcher (`backend/github_client.py`, `backend/github_sbom.py`)**
-* Authenticates with the GitHub API using a fine-grained PAT.
+* Authenticates with the GitHub API as a GitHub App: a per-org installation token, scoped to Contents and Metadata read (`backend/gh_app.py`). Per-org PATs remain as a deprecated fallback.
 * Lists the repositories in each target org and resolves each repo's branch.
 * Downloads the SPDX 2.3 SBOM from `GET /repos/{org}/{repo}/dependency-graph/sbom`.
 

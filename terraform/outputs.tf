@@ -27,6 +27,7 @@ output "rds_endpoint" {
 output "secrets_arns" {
   description = "ARNs of the Secrets Manager secrets (populate values manually)"
   value = {
+    github         = aws_secretsmanager_secret.github.arn
     github_pat     = aws_secretsmanager_secret.github_pat.arn
     dtrack_api_key = aws_secretsmanager_secret.dtrack_api_key.arn
     gemini_api_key = aws_secretsmanager_secret.gemini_api_key.arn

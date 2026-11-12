@@ -288,7 +288,7 @@ class TestPutSettingsAwsGuard(unittest.TestCase):
         self.assertEqual(result['status'], 503)
         self.assertIn('error', result['body'])
         self.assertIn('Secrets Manager', result['body']['error'])
-        self.assertIn('lde/github-pat', result['body']['error'])
+        self.assertIn('GitHub auth', result['body']['error'])
         self.assertIn('lde/dtrack-api-key', result['body']['error'])
         self.assertIn('lde/gemini-api-key', result['body']['error'])
         self.assertIn('Step 4', result['body']['error'])

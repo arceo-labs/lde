@@ -2,7 +2,7 @@
 
 import json
 import os
-import re
+import threading
 
 from . import log as log_mod
 
@@ -12,6 +12,7 @@ SERVE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SETTINGS_PATH = os.path.join(SERVE_DIR, '.settings.json')
 
 ALLOWED_KEYS = {
+    'github',
     'default_orgs',
     'github_pats',
     'dtrack_url',
@@ -34,13 +35,23 @@ ALLOWED_KEYS = {
     'enabled_package_managers',
 }
 
-SENSITIVE_KEYS = {'github_pats', 'dtrack_api_key', 'gemini_api_key', 'basic_auth_credentials'}
+# The GitHub org map (backend/gh_config.py) and the old keys it replaces. They
+# are changed through /api/github/orgs, never PUT /api/settings, and never
+# returned by GET /api/settings (/api/gh-status describes them without secrets).
+GITHUB_KEYS = {'github', 'default_orgs', 'github_pats'}
+API_WRITABLE_KEYS = ALLOWED_KEYS - GITHUB_KEYS
+
+# Never in ALLOWED_KEYS: not read from .settings.json or the API, only overlaid
+# from the lde/github secret.
+_SECRET_ONLY_KEYS = {'github_secret', 'github_secret_error'}
+SENSITIVE_KEYS = {'dtrack_api_key', 'gemini_api_key', 'basic_auth_credentials'}
+# Removed from GET /api/settings entirely rather than masked.
+_HIDDEN_KEYS = _SECRET_ONLY_KEYS | GITHUB_KEYS
 
 DEFAULTS = {
-    'default_orgs': [],
-    # GitHub PATs: {"<org-or-user>": "<token>"}. A fine-grained PAT is bound to
-    # one resource owner, so reviewing several orgs needs one token each.
-    'github_pats': {},
+    # GitHub orgs and their auth live in "github" (backend/gh_config.py,
+    # docs/github-app.md). The old default_orgs / github_pats keys have no
+    # defaults: they are only read, to migrate.
     'dtrack_url': 'http://localhost:8081',
     'dtrack_ui_url': 'http://localhost:8080',
     'dtrack_api_key': '',
@@ -86,10 +97,9 @@ DEFAULTS = {
 }
 
 
-LEGACY_PAT_NOTICE = ('"github_pat" is no longer used. Move the token into '
-                     '"github_pats": {"<org>": "<token>"} in .settings.json (or add it per org '
-                     'in Settings; use "*" for a token that covers every other org), then '
-                     'delete "github_pat".')
+LEGACY_PAT_NOTICE = ('"github_pat" is no longer used. Add each org in Settings with its own '
+                     'GitHub App or fine-grained PAT, then delete "github_pat" from '
+                     '.settings.json.')
 _legacy_logged = False
 
 
@@ -113,8 +123,21 @@ def legacy_pat_notice():
     return LEGACY_PAT_NOTICE if present else ''
 
 
+IGNORED_GITHUB_ENV = tuple(f'LDE_{k.upper()}' for k in sorted(GITHUB_KEYS))
+
+
+def github_env_notice():
+    """Name any GitHub env override still set (they are ignored), else ''. Never reads values."""
+    found = [name for name in IGNORED_GITHUB_ENV if name in os.environ]
+    if not found:
+        return ''
+    return (f'{", ".join(found)} {"is" if len(found) == 1 else "are"} ignored: GitHub orgs '
+            'come only from Settings (.settings.json, or lde/github on AWS). Unset '
+            f'{"it" if len(found) == 1 else "them"}.')
+
+
 # Org names that ship in .settings.json.example. Reviewing one of these is almost
-# certainly a copied example config, and a "*" token would send it to GitHub.
+# certainly a copied example config.
 PLACEHOLDER_ORGS = frozenset({
     'example-org', 'example-org-hris', 'example-org-test', 'another-org', 'example-website',
 })
@@ -153,94 +176,79 @@ def load_settings():
     # When LDE_SECRETS_SOURCE=aws, overlay values from AWS Secrets Manager.
     from . import secrets_loader
     secrets_loader.overlay(merged)
-    # Allow any allowed key to be overridden via LDE_<KEY_UPPER> env var.
-    # Useful for non-sensitive config (e.g. LDE_DTRACK_URL) in ECS task defs.
-    for key in ALLOWED_KEYS:
+    # Any allowed key except the GitHub ones can be overridden via LDE_<KEY_UPPER>.
+    # Useful for non-sensitive config (e.g. LDE_DTRACK_URL) in ECS task defs. The
+    # GitHub org map comes only from .settings.json or lde/github, the one place
+    # Settings writes it (github_env_notice() flags a leftover variable).
+    for key in ALLOWED_KEYS - GITHUB_KEYS:
         env_val = os.environ.get('LDE_' + key.upper())
-        if env_val is None:
-            continue
-        if key == 'github_pats':
-            try:
-                env_val = json.loads(env_val)
-            except ValueError:
-                continue
-            if not isinstance(env_val, dict):
-                continue
-        merged[key] = env_val
+        if env_val is not None:
+            merged[key] = env_val
     return merged
 
 
-_PAT_OWNER_RE = re.compile(r'^(\*|[A-Za-z0-9._-]+)$')
-_MASK_SUFFIX = '…'
+def save_settings(updates, remove=()):
+    """Write *updates* (allowed keys only) to .settings.json, drop the keys in *remove*,
+    and return the settings now in effect.
 
-
-def merge_github_pats(existing, patch):
-    """Return *existing* with the per-org *patch* applied.
-
-    Keys are lower-cased org names. An empty value removes the org; a value
-    ending in the mask character (what GET /api/settings returns) is ignored
-    so a round-tripped form cannot overwrite a real token.
+    The file is rewritten from its own contents, never from load_settings(): LDE_*
+    environment overrides and Secrets Manager values stay out of it. Keys the
+    file already holds, including ones LDE no longer reads, are kept.
     """
-    if not isinstance(patch, dict):
-        raise ValueError('github_pats must be a JSON object of {org: token}')
-    merged = ({k.lower(): v for k, v in existing.items() if isinstance(k, str)}
-              if isinstance(existing, dict) else {})
-    for owner, token in patch.items():
-        if not isinstance(owner, str) or not _PAT_OWNER_RE.match(owner):
-            raise ValueError('github_pats keys must be GitHub org or user names, or *')
-        if not isinstance(token, str):
-            raise ValueError('github_pats values must be strings')
-        token = token.strip()
-        key = owner.lower()
-        if not token:
-            merged.pop(key, None)
-        elif not token.endswith(_MASK_SUFFIX):
-            merged[key] = token
-    return merged
-
-
-def save_settings(updates):
-    current = load_settings()
+    on_disk = _read_settings_file()
     for k, v in updates.items():
-        if k not in ALLOWED_KEYS:
-            continue
-        if k == 'github_pats':
-            current[k] = merge_github_pats(current.get(k), v)
-        else:
-            current[k] = v
-    # load_settings() drops the retired github_pat. Keep it on disk, untouched, until
-    # the user moves it into github_pats and deletes it, so an unrelated save does not
-    # destroy the token or the "old config" notice. It never goes into the return value.
-    on_disk = dict(current)
-    legacy = _stored_legacy_pat()
-    if legacy is not None:
-        on_disk['github_pat'] = legacy
-    with open(SETTINGS_PATH, 'w') as f:
-        json.dump(on_disk, f, indent=2)
-    os.chmod(SETTINGS_PATH, 0o600)
-    return current
+        if k in ALLOWED_KEYS:
+            on_disk[k] = v
+    for k in remove:
+        on_disk.pop(k, None)
+    for k in _SECRET_ONLY_KEYS:
+        on_disk.pop(k, None)
+    _write_private_json(SETTINGS_PATH, on_disk)
+    return load_settings()
 
 
-def _stored_legacy_pat():
-    """Return the raw ``github_pat`` value stored in the settings file, else None."""
+def _read_settings_file():
+    """The settings file as stored, or {} when there is none. Raises ValueError if unreadable."""
+    if not os.path.exists(SETTINGS_PATH):
+        return {}
+    with open(SETTINGS_PATH, 'r') as f:
+        stored = json.load(f)
+    if not isinstance(stored, dict):
+        raise ValueError('.settings.json is not a JSON object; fix it before saving settings.')
+    return stored
+
+
+def _write_private_json(path, doc):
+    """Write *doc* to *path* atomically, owner-only from the first byte.
+
+    A temp file in the same directory is created 0600 and renamed over *path*,
+    so a concurrent load_settings() sees the old file or the new one, never a
+    half-written one, and PATs are never readable by other users.
+    """
+    tmp = f'{path}.{os.getpid()}.{threading.get_ident()}.tmp'
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     try:
-        with open(SETTINGS_PATH, 'r') as f:
-            return json.load(f).get('github_pat')
-    except (OSError, ValueError, AttributeError):
-        return None
+        with os.fdopen(fd, 'w') as f:
+            json.dump(doc, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def masked(settings):
-    out = dict(settings)
+    out = {k: v for k, v in settings.items() if k not in _HIDDEN_KEYS}
     for k in SENSITIVE_KEYS:
         val = out.get(k)
         if val is None:
             continue
         if isinstance(val, str):
             out[k] = val[:4] + '…' if len(val) > 4 else '…'
-        elif k == 'github_pats' and isinstance(val, dict):
-            out[k] = {o: (t[:4] + '…' if len(t) > 4 else '…') for o, t in val.items()
-                      if isinstance(t, str)}
         else:
             # Non-string sensitive values (e.g. basic_auth_credentials dict)
             # cannot be safely truncated — omit them entirely.

@@ -1,16 +1,14 @@
 {
-  "default_orgs": [
-    "example-org",
-    "example-org-hris",
-    "example-org-test",
-    "another-org",
-    "example-website"
-  ],
-  "github_pats": {
-    "example-org": "",
-    "another-org": ""
+  "github": {
+    "orgs": {
+      "example-org": {"auth": "none", "scan": true},
+      "example-org-hris": {"auth": "none", "scan": true},
+      "example-org-test": {"auth": "none", "scan": false},
+      "another-org": {"auth": "none", "scan": true},
+      "example-website": {"auth": "none", "scan": true}
+    }
   },
-  "_github_pats_note": "One fine-grained PAT per org — Contents: Read-only + Metadata: Read-only. Use a \"*\" key for a token that covers every other org (e.g. a classic PAT). Required in Fargate and locally.",
+  "_github_note": "Every GitHub org LDE reads, keyed by org name. auth is one of: \"app\" (the org's own GitHub App: \"app_id\" plus \"private_key_path\" to a chmod 600 PEM; Settings -> Create app for <org> fills these in), \"enterprise\" (the enterprise_app below), \"pat\" (DEPRECATED: \"token\", a fine-grained PAT for that org) or \"none\". scan: true puts the org in runs that name no orgs. There is no \"*\" org. Optional top-level \"enterprise_app\": {\"enterprise\": \"<slug>\", \"app_id\": \"<id>\", \"private_key_path\": \"<pem>\"}. Change orgs in Settings or PUT /api/github/orgs/<org>; app keys are never set through the API. In AWS the lde/github secret holds this map with inline private_key values. See docs/github-app.md.",
   "gemini_model": "gemini-3.8-flash",
   "_gemini_model_note": "Gemini model used for package extraction. Override without redeploying via LDE_GEMINI_MODEL env var or PUT /api/settings.",
   "dtrack_url": "http://localhost:8081",

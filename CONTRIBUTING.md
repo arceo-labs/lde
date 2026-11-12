@@ -6,11 +6,11 @@
 |---|---|---|
 | Python | 3.11+ | `brew install python@3.12` |
 | Docker + Compose v2 | 24+ | Runs Dependency-Track locally |
-| GitHub PAT | — | Fine-grained token: Contents Read-only + Metadata Read-only |
+| GitHub App | — | Contents Read-only + Metadata Read-only, installed on each org. See `docs/github-app.md`. |
 
-No pip packages are needed to run the server — it uses Python stdlib only.
+The server needs one pip package, `cryptography`, to sign GitHub App JWTs. Everything else is stdlib.
 
-Install test dependencies:
+Install runtime and test dependencies (pytest refuses to start without `cryptography`):
 
 ```bash
 pip install -r requirements.txt

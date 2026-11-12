@@ -28,7 +28,7 @@ description: Use when asked to stand up, push, ship, redeploy, reset or tear dow
     - `WARN ... root user`: ask once per session whether to continue as root.
 
 4. **Gate every apply and destroy**, the targeted ECR apply included. Save the plan (`plan -out`, or `plan -destroy -out`), show its add/change/destroy counts, resource types and ingress CIDRs with the guide's cost table, get the go-ahead, then apply that plan file. A go-ahead covers the plan it answered.
-    - **Teardown:** name what is lost for good: the Dependency-Track database (projects and admin login), LDE run history on EFS, the four `lde/*` secrets, the ECR images. The ALB gets a new DNS name. Ask whether to copy `dev-lde-dtrack-final` to `dev-lde-dtrack-<date>` first; the copy bills until deleted.
+    - **Teardown:** name what is lost for good: the Dependency-Track database (projects and admin login), LDE run history on EFS, the five `lde/*` secrets (`lde/github` holds every app's private key: the apps stay on GitHub, but each needs a new key or a fresh **Create app**), the ECR images. The ALB gets a new DNS name. Ask whether to copy `dev-lde-dtrack-final` to `dev-lde-dtrack-<date>` first; the copy bills until deleted.
     - A targeted apply that fails on `Moved resource instances excluded by targeting` needs an untargeted plan. It carries every pending `.tf` change: name each one when you show it.
 
 5. **Hand over the user-run steps** as exact commands.
@@ -51,6 +51,8 @@ Run `verify` first. Then follow the request inward, from the ALB to LDE:
 ## Handling secrets
 
 Read secrets and `~/.lde/*` files inside a Python process, and print lengths, prefixes and names only. `~/.lde/lde-admin.txt` holds the LDE username, then the password: build the Basic Auth header in Python for any ad-hoc call.
+
+`lde/github` holds private keys and PATs, and LDE writes it itself from Settings: never print it or write it by hand. `verify` checks its shape. `verify` warns while `lde/github-pat` is still set after `lde/github` has been written; resetting it to `REPLACE_ME` is the user's call.
 
 ## Report
 

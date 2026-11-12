@@ -24,7 +24,9 @@ from urllib.parse import urlparse, parse_qs
 from backend import (
     db,
     dtrack_client,
+    gh_app_setup,
     gh_auth,
+    gh_config,
     github_client,
     log as log_mod,
     pipeline,
@@ -56,7 +58,7 @@ _ALLOWED_ORIGIN = os.environ.get('LDE_ALLOWED_ORIGIN', '').strip().rstrip('/')
 _LOCAL_ORIGIN_RE = re.compile(r'^https?://(localhost|127\.0\.0\.1)(:\d+)?$')
 # Methods that change state. They must send JSON, which a cross-site page can
 # only do after a CORS preflight that _cors_headers refuses (CSRF guard).
-_MUTATING_METHODS = frozenset({'POST', 'PUT'})
+_MUTATING_METHODS = frozenset({'POST', 'PUT', 'DELETE'})
 
 
 def _origin_allowed(origin):
@@ -105,10 +107,17 @@ def _get_basic_auth_creds():
     return _load_basic_auth_creds()
 
 
+# The only fields PUT /api/github/orgs/<org> takes: app IDs and keys never come over HTTP.
+_GITHUB_ORG_FIELDS = frozenset({'auth', 'scan', 'token'})
+
 ROUTES = [
     ('GET',  r'^/api/settings$',                                'handle_get_settings'),
     ('PUT',  r'^/api/settings$',                                'handle_put_settings'),
     ('GET',  r'^/api/gh-status$',                               'handle_gh_status'),
+    ('POST', r'^/api/gh-app/manifest$',                         'handle_gh_app_manifest'),
+    ('GET',  r'^/api/gh-app/callback$',                         'handle_gh_app_callback'),
+    ('PUT',    r'^/api/github/orgs/([A-Za-z0-9-]{1,39})$',      'handle_put_github_org'),
+    ('DELETE', r'^/api/github/orgs/([A-Za-z0-9-]{1,39})$',      'handle_delete_github_org'),
     ('GET',  r'^/api/dtrack-status$',                           'handle_dtrack_status'),
     ('GET',  r'^/api/gemini-status$',                           'handle_gemini_status'),
 
@@ -164,11 +173,20 @@ def _valid_branch(branch):
     return True
 
 
+# The GitHub App setup callback carries a one-time code that GitHub exchanges for the
+# new app's private key, so its query string never goes into the access log.
+_REDACTED_QUERY_RE = re.compile(r'(/api/gh-app/callback/?)\?\S*')
+
+
+def _redact_request_line(line):
+    return _REDACTED_QUERY_RE.sub(r'\1?<redacted>', line)
+
+
 class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         if HTTP_LOG_ENABLED:
-            line = log_mod.safe(fmt % args)
+            line = _redact_request_line(log_mod.safe(fmt % args))
             logger.debug('%s - %s', self.address_string(), line)
 
     # ---- Routing -------------------------------------------------------
@@ -201,7 +219,7 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def _reject_cross_site(self):
-        """Send 415/403 and return True for a POST/PUT that could be cross-site."""
+        """Send 415/403 and return True for a POST/PUT/DELETE that could be cross-site."""
         media_type = self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower()
         if media_type != 'application/json':
             self._json_response(415, {'error': 'Content-Type must be application/json'})
@@ -222,6 +240,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         if not self._route('PUT'):
+            self._json_response(404, {'error': 'Not found'})
+
+    def do_DELETE(self):
+        if not self._route('DELETE'):
             self._json_response(404, {'error': 'Not found'})
 
     def do_OPTIONS(self):
@@ -303,7 +325,8 @@ class Handler(BaseHTTPRequestHandler):
             "object-src 'none'; "
             "frame-ancestors 'none'; "
             "base-uri 'self'; "
-            "form-action 'self'"
+            # github.com: Settings form-posts the GitHub App manifest there.
+            "form-action 'self' https://github.com"
         )
         # The ALB terminates TLS and sets X-Forwarded-Proto=https on the hop
         # to this task. Emit HSTS only on the HTTPS path so local dev over
@@ -391,15 +414,20 @@ class Handler(BaseHTTPRequestHandler):
         if os.environ.get('LDE_SECRETS_SOURCE', '').lower() == 'aws':
             self._json_response(503, {
                 'error': 'Settings cannot be changed through the UI on this deployment. '
-                         'Write lde/github-pat, lde/dtrack-api-key, and lde/gemini-api-key in '
-                         'AWS Secrets Manager (docs/aws-deployment.md ## Step 4 — Populate secrets). '
-                         'LDE reads Secrets Manager within a minute.'
+                         'Write lde/dtrack-api-key and lde/gemini-api-key in AWS Secrets '
+                         'Manager (docs/aws-deployment.md ## Step 4 — Populate secrets). '
+                         'LDE reads Secrets Manager within a minute. GitHub orgs are '
+                         'changed in Settings -> GitHub auth.'
             })
             return
         patch = self._read_body()
         if not isinstance(patch, dict):
             raise ValueError('Body must be a JSON object')
-        unknown = set(patch.keys()) - settings_mod.ALLOWED_KEYS
+        github_keys = set(patch.keys()) & settings_mod.GITHUB_KEYS
+        if github_keys:
+            raise ValueError(f'{sorted(github_keys)} are not settings any more: change GitHub '
+                             'orgs with PUT/DELETE /api/github/orgs/<org> (docs/api.md)')
+        unknown = set(patch.keys()) - settings_mod.API_WRITABLE_KEYS
         if unknown:
             raise ValueError(f'Unknown settings keys: {sorted(unknown)}')
         updated = settings_mod.save_settings(patch)
@@ -407,6 +435,68 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_gh_status(self, groups, qs):
         self._json_response(200, gh_auth.auth_status())
+
+    def handle_put_github_org(self, groups, qs):
+        """Add or change one org in the GitHub org map. Tokens are write-only."""
+        body = self._read_body()
+        if not isinstance(body, dict):
+            raise ValueError('Body must be a JSON object')
+        unknown = set(body) - _GITHUB_ORG_FIELDS
+        if unknown:
+            raise ValueError(f'Unknown fields: {sorted(unknown)}. App IDs and keys are never '
+                             'set through the API')
+        org = gh_config.set_org(groups[0], auth=body.get('auth'), scan=body.get('scan'),
+                                token=body.get('token'))
+        self._json_response(200, org)
+
+    def handle_delete_github_org(self, groups, qs):
+        if not gh_config.remove_org(groups[0]):
+            self._json_response(404, {'error': f'{groups[0].lower()} is not in the GitHub org map'})
+            return
+        self._json_response(200, {'deleted': groups[0].lower()})
+
+    def handle_gh_app_manifest(self, groups, qs):
+        """Start GitHub App creation: return the manifest and the github.com URL to post it to.
+
+        The app's redirect URL is built from the request's Origin, which must be an
+        allowed origin, never from the Host header.
+        """
+        origin = (self.headers.get('Origin') or '').rstrip('/')
+        if not origin or not _origin_allowed(origin):
+            raise ValueError('Creating a GitHub App needs a request from the LDE page itself '
+                             '(an allowed Origin header). Set LDE_ALLOWED_ORIGIN when LDE is '
+                             'not on localhost.')
+        body = self._read_body()
+        if not isinstance(body, dict):
+            raise ValueError('Body must be a JSON object')
+        unknown = set(body) - {'org', 'name'}
+        if unknown:
+            raise ValueError(f'Unknown fields: {sorted(unknown)}')
+        self._json_response(200, gh_app_setup.start(
+            origin, org=body.get('org', ''), name=body.get('name', '')))
+
+    def handle_gh_app_callback(self, groups, qs):
+        """GitHub's redirect after the user creates the app. Always answers with a redirect."""
+        code = (qs.get('code') or [''])[0]
+        state = (qs.get('state') or [''])[0]
+        try:
+            app = gh_app_setup.complete(code, state)
+        except gh_app_setup.SetupError as exc:
+            logger.warning('GitHub App setup failed (%s): %s', exc.reason, log_mod.safe(str(exc)))
+            self._redirect(f'/settings?gh_app_error={exc.reason}')
+            return
+        # Straight on to installing the new app; its setup_url brings the user back.
+        self._redirect(gh_app_setup.install_url(app['slug']) or '/settings?gh_app=created')
+
+    def _redirect(self, location):
+        self._response_status = 303
+        self.send_response(303)
+        self.send_header('Location', location)
+        self.send_header('Content-Length', '0')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self._security_headers()
+        self.end_headers()
 
     def handle_dtrack_status(self, groups, qs):
         """Validate the saved Dependency-Track API key against DT.
@@ -499,9 +589,9 @@ class Handler(BaseHTTPRequestHandler):
             derived_orgs = list(dict.fromkeys(r.split('/')[0] for r in requested_repos))
             requested_orgs = derived_orgs
         if not requested_orgs:
-            requested_orgs = settings_mod.load_settings().get('default_orgs') or []
+            requested_orgs = gh_config.scan_orgs(gh_config.load())
         if not requested_orgs:
-            raise ValueError('No orgs provided and no defaults configured')
+            raise ValueError('No orgs provided and no org has scan on in Settings -> GitHub auth')
 
         method = body.get('method') or 'github_sbom'
         valid = self._valid_methods_for_env()
@@ -510,8 +600,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('ORT is disabled in this deployment (no Docker socket)')
             raise ValueError(f'Invalid method {method!r}: must be one of {sorted(valid)}')
 
-        # An org copied from .settings.json.example is not a real target, even when a
-        # "*" token would let the call through.
+        # An org copied from .settings.json.example is not a real target.
         # Check every org the run can reach. A mixed repos list (org/repo plus bare
         # names) keeps requested_orgs at the defaults, so add the org/repo prefixes too;
         # the stored org list is unchanged.
@@ -521,18 +610,17 @@ class Handler(BaseHTTPRequestHandler):
         if placeholders:
             raise ValueError(
                 f'{", ".join(placeholders)} {"is an example org" if len(placeholders) == 1 else "are example orgs"} '
-                'from .settings.json.example. Replace default_orgs in Settings with your real orgs, '
-                'or pass orgs explicitly.')
+                'from .settings.json.example. Remove it in Settings -> GitHub auth and add your '
+                'real orgs, or pass orgs explicitly.')
 
-        # Fail fast: an org with no PAT (and no "*" entry) would only fail later,
-        # inside the pipeline, where it is logged and skipped.
+        # Fail fast: an org LDE cannot authenticate to (not in the org map, no
+        # credential, app not installed) would only fail later, inside the
+        # pipeline, where it is logged and skipped.
         if method == 'github_sbom':
-            missing = github_client.orgs_without_token(check_orgs)
+            missing = github_client.orgs_without_credentials(check_orgs)
             if missing:
-                shown = ', '.join(str(o)[:80] for o in missing[:10])
-                raise ValueError(
-                    f'No GitHub PAT configured for: {shown}. Add one per org in Settings, '
-                    'or add a "*" entry to use one token for every other org.')
+                shown = ' '.join(reason for _, reason in missing[:10])
+                raise ValueError(f'Cannot scan {len(missing)} org(s). {shown}')
 
         # Optional run-level branch override. `use_default` (or an empty
         # branch) means "use each repo's configured/default branch", stored

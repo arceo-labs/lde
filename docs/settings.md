@@ -10,13 +10,15 @@ Secrets Manager and the `PUT /api/settings` endpoint returns `503` — the file 
 
 Each key is resolved in this priority order (highest wins):
 
-1. `LDE_<KEY_UPPER>` environment variable (e.g. `LDE_DTRACK_URL`)
+1. `LDE_<KEY_UPPER>` environment variable (e.g. `LDE_DTRACK_URL`), except for the GitHub keys
 2. AWS Secrets Manager overlay (only when `LDE_SECRETS_SOURCE=aws`)
 3. `.settings.json` on disk
 4. Built-in default
 
-Sensitive keys (`github_pats`, `dtrack_api_key`, `gemini_api_key`) are truncated to 4 chars + `…`
-in all API responses. Their full values are never returned to the browser.
+Sensitive keys (`dtrack_api_key`, `gemini_api_key`) are truncated to 4 chars + `…` in all API
+responses. Their full values are never returned to the browser. GitHub settings (the org map and
+the old GitHub keys) are left out of `GET /api/settings` entirely. `/api/gh-status` describes
+each org without its token, key or key path.
 
 ---
 
@@ -24,19 +26,25 @@ in all API responses. Their full values are never returned to the browser.
 
 | Key | Type | Default | Sensitive |
 |---|---|---|---|
-| `github_pats` | object `{org: token}` | `{}` | Yes — each token masked in API responses |
-| `default_orgs` | array of strings | `[]` | No |
+| `github` | object `{orgs: {<org>: {...}}, enterprise_app}` | not set | Yes: never returned by the API |
 
-**`github_pats`** — One fine-grained PAT per org, as `{"<org>": "<token>"}`. Each needs Contents:
-Read-only and Metadata: Read-only. Required in Fargate and locally.
-An org with no entry is an error, never an unauthenticated call. The key `"*"` is the token for
-any org without its own entry (for example a classic PAT that spans orgs).
-`PUT /api/settings` merges per org: send `""` to remove one. `LDE_GITHUB_PATS` (a JSON object)
-overrides the map. In AWS, the secret `lde/github-pat` holds the same JSON object
-([Step 4](aws-deployment.md)).
+**`github`** — The GitHub org map: every org LDE reads, how each authenticates (`app`,
+`enterprise`, `pat` or `none`), and `scan`, which puts the org in runs that name no orgs. Change
+it in **Settings → GitHub auth** or with `PUT`/`DELETE /api/github/orgs/{org}` ([API](api.md)).
+`PUT /api/settings` rejects it with `400`.
 
-**`default_orgs`** — Org names pre-filled in the Ingest UI. Does not restrict which orgs can be
-scanned — it only sets the default input value.
+App keys are files (`private_key_path`, chmod 600). App IDs and keys are added by **Create app
+for &lt;org&gt;** or by hand, never over HTTP. No environment variable overrides the map.
+In AWS the `lde/github` secret holds the map, with each key inline, and the file key is not
+used. The format, the enterprise app and key handling are in [GitHub App](github-app.md).
+
+### Old GitHub keys
+
+`default_orgs` and `github_pats` (on AWS, the `lde/github-pat` secret) are still read, to build
+the org map, until `github` (or `lde/github`) is first written. Then they are removed from
+`.settings.json`. `PUT /api/settings` rejects both. The `"*"` entry of `github_pats` is ignored:
+there is no catch-all token any more. See
+[Moving from the old settings](github-app.md#moving-from-the-old-settings).
 
 ---
 

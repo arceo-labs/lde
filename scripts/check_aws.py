@@ -34,11 +34,16 @@ CALL_TIMEOUT = 60
 # Secret name -> Terraform address of the secret shell.
 SECRETS = {
     'lde/basic-auth': 'aws_secretsmanager_secret.basic_auth',
+    'lde/github': 'aws_secretsmanager_secret.github',
     'lde/github-pat': 'aws_secretsmanager_secret.github_pat',
     'lde/dtrack-api-key': 'aws_secretsmanager_secret.dtrack_api_key',
     'lde/gemini-api-key': 'aws_secretsmanager_secret.gemini_api_key',
 }
 PLACEHOLDER = 'REPLACE_ME'
+# The old GitHub secret: read by LDE only until lde/github is written.
+LEGACY_GITHUB_SECRETS = ('lde/github-pat',)
+_PEM_RE = re.compile(r'-----BEGIN (RSA )?PRIVATE KEY-----\n.+\n-----END (RSA )?PRIVATE KEY-----\n?',
+                     re.DOTALL)
 
 
 class Report:
@@ -376,11 +381,47 @@ def check_dns(report, domains, alb_dns, resolver):
                         f'({DOC}, Application DNS)')
 
 
+def _github_map_shape(secret_id, value):
+    """Check lde/github with the validator LDE itself uses. Never echoes keys or tokens."""
+    sys.path.insert(0, SERVE_DIR)
+    from backend import gh_config
+    try:
+        doc = json.loads(value)
+    except ValueError:
+        return 'FAIL', f'{secret_id} is not JSON (docs/github-app.md)'
+    try:
+        conf = gh_config.validate(doc, path_ok=False, inline_ok=True)
+    except gh_config.ConfigError as exc:
+        return 'FAIL', f'{secret_id}: {exc}'
+    apps = [(f'org {o}', e) for o, e in conf['orgs'].items() if e['auth'] == 'app']
+    if conf['enterprise_app']:
+        apps.append(('enterprise_app', conf['enterprise_app']))
+    for where, e in apps:
+        if not _PEM_RE.fullmatch(e['private_key']):
+            return 'FAIL', (f'{secret_id}: {where}: private_key must be the unencrypted PEM file '
+                            'GitHub generated (use jq --rawfile so newlines survive)')
+    kinds = {}
+    for e in conf['orgs'].values():
+        kinds[e['auth']] = kinds.get(e['auth'], 0) + 1
+    summary = ', '.join(f'{n} {k}' for k, n in sorted(kinds.items())) or 'no orgs'
+    scan = sum(e['scan'] for e in conf['orgs'].values())
+    ent = f'; enterprise app for {conf["enterprise_app"]["enterprise"]}' if conf['enterprise_app'] else ''
+    msg = f'{secret_id}: {len(conf["orgs"])} org(s) ({summary}), {scan} scanned{ent}'
+    if kinds.get('pat'):
+        return 'WARN', msg + '; PATs are deprecated, create a GitHub App for those orgs in Settings'
+    return 'OK', msg
+
+
 def secret_shape(secret_id, value):
     """Return (level, message) describing value without revealing it."""
     stripped = value.strip()
     if secret_id == 'lde/gemini-api-key' and value == PLACEHOLDER:
         return 'WARN', f'{secret_id} is {PLACEHOLDER}: Gemini package extraction is off'
+    if secret_id == 'lde/github' and value == PLACEHOLDER:
+        return 'WARN', (f'{secret_id} is {PLACEHOLDER}: LDE writes it on the first change in '
+                        'Settings -> GitHub auth (docs/github-app.md)')
+    if secret_id == 'lde/github-pat' and value == PLACEHOLDER:
+        return 'OK', f'{secret_id} is {PLACEHOLDER} (old PAT secret, not needed)'
     if not stripped:
         return 'FAIL', f'{secret_id} is empty'
     if value == PLACEHOLDER:
@@ -396,6 +437,8 @@ def secret_shape(secret_id, value):
                 isinstance(h, str) and re.fullmatch(r'[0-9a-f]{64}', h) for h in doc.values()):
             return 'FAIL', f'{secret_id} must map each username to a 64-char sha256 hex'
         return 'OK', f'{secret_id}: {len(doc)} user(s), sha256 hashes'
+    if secret_id == 'lde/github':
+        return _github_map_shape(secret_id, value)
     if secret_id == 'lde/github-pat':
         keys = []
 
@@ -419,6 +462,9 @@ def secret_shape(secret_id, value):
         if dupes:
             return 'FAIL', (f'{secret_id} repeats an org (keys are case-insensitive): {", ".join(dupes)}. '
                             'Keep one token per org')
+        if '*' in doc:
+            return 'WARN', (f'{secret_id}: {len(doc)} org(s); the "*" token is no longer used. '
+                            'Add each org in Settings -> GitHub auth instead')
         odd = sorted(k for k, t in doc.items() if not t.startswith(('github_pat_', 'ghp_')))
         if odd:
             return 'WARN', f'{secret_id}: {len(doc)} org(s); no github_pat_ or ghp_ prefix for {", ".join(odd)}'
@@ -427,13 +473,28 @@ def secret_shape(secret_id, value):
 
 
 def check_secrets(report, aws):
+    usable = {}
     for secret_id in SECRETS:
         rc, out, err = aws('secretsmanager', 'get-secret-value', '--secret-id', secret_id)
         if rc != 0 or not out:
             report.fail(f'{secret_id}: {err.splitlines()[-1] if err else "unreadable"}')
             continue
-        level, msg = secret_shape(secret_id, out.get('SecretString', ''))
+        value = out.get('SecretString', '')
+        level, msg = secret_shape(secret_id, value)
         {'OK': report.ok, 'WARN': report.warn, 'FAIL': report.fail}[level](msg)
+        usable[secret_id] = level != 'FAIL' and value != PLACEHOLDER
+    legacy = [s for s in LEGACY_GITHUB_SECRETS if usable.get(s)]
+    if usable.get('lde/github'):
+        if legacy:
+            report.warn('lde/github-pat is still set but no longer read now that lde/github is '
+                        f'written: set it back to {PLACEHOLDER}')
+    elif legacy:
+        report.warn('LDE reads its GitHub orgs from the old lde/github-pat until the first save '
+                    'in Settings -> GitHub auth moves them into lde/github')
+    else:
+        # Not a failure: on a fresh deploy orgs and apps are added from the running site.
+        report.warn('no GitHub orgs yet: scans fail until you add orgs and create their '
+                    'GitHub Apps in LDE under Settings -> GitHub auth (docs/github-app.md)')
 
 
 def _http(url, auth=None, follow=False):
@@ -466,6 +527,19 @@ def _lde_auth():
     except (OSError, ValueError):
         return None, None
     return user, base64.b64encode(f'{user}:{password}'.encode()).decode()
+
+
+def _gh_status_summary(data):
+    """One line for a good /api/gh-status: each org and how it authenticates. No tokens."""
+    # The orgs logged_in counts: any with a credential, or with scan on.
+    orgs = [r for r in data.get('orgs') or []
+            if isinstance(r, dict) and (r.get('auth') != 'none' or r.get('scan'))]
+    ok = [r for r in orgs if r.get('ok')]
+    parts = [f'{r.get("org")} via {r.get("auth")}' for r in ok]
+    ent = data.get('enterprise_app')
+    if isinstance(ent, dict) and ent.get('ok'):
+        parts.insert(0, f'enterprise app {ent.get("name") or ent.get("slug") or ent.get("app_id")}')
+    return f'{len(ok)}/{len(orgs)} orgs authenticated' + (f' ({", ".join(parts)})' if parts else '')
 
 
 def check_endpoints(report, lde_domain, dtrack_domain):
@@ -501,8 +575,10 @@ def check_endpoints(report, lde_domain, dtrack_domain):
             except ValueError:
                 data = {}
             if status == 200 and data.get(key):
-                who = (data.get('accounts') or [{}])[0].get('user') if key == 'logged_in' else None
-                report.ok(f'{path}: ' + (f'authenticated as {who}' if who else data.get('message', 'ok')))
+                if key == 'logged_in':
+                    report.ok(f'{path}: {_gh_status_summary(data)}')
+                else:
+                    report.ok(f'{path}: {data.get("message", "ok")}')
             else:
                 msg = data.get('message') or data.get('raw') or body[:120] or status
                 getattr(report, level)(f'{path}: {msg}')

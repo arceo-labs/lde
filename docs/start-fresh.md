@@ -111,13 +111,14 @@ start_fresh: Dependency-Track admin login failed (HTTP 401: INVALID_CREDENTIALS)
 
 Run `python3 scripts/start_fresh.py --keep-dtrack` to clear LDE only, or recover the password (below).
 
-**GitHub token rejected.** Reported as a warning; the script still succeeds:
+**GitHub auth incomplete.** Reported as a warning; the script still succeeds:
 
 ```
-[start_fresh] WARN GitHub: PAT is configured but authentication failed (HTTP 401). ... github_sbom runs will fail.
+[start_fresh] WARN GitHub: GitHub App: ... github_sbom runs will fail.
 ```
 
-Set a valid token per org under `github_pats` in `.settings.json`.
+The message names the app problem or the orgs without the app. Fix it with the table in
+[GitHub App, Step 4](github-app.md#step-4-confirm).
 
 ## Recover the Dependency-Track admin password
 

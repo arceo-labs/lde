@@ -1,3 +1,4 @@
-# Runtime: stdlib only (Python 3.11+).
+# Runtime (Python 3.11+): stdlib plus cryptography, used only to sign GitHub App JWTs.
+cryptography==46.0.3
 # Test deps:
 pytest>=8.0
