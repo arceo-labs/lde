@@ -1,6 +1,6 @@
 # Library Dependency Explorer — production image
 # stdlib-only Python app; no pip install needed at runtime.
-FROM --platform=linux/amd64 python:3.11-slim
+FROM --platform=linux/amd64 python:3.15-slim
 
 # Non-root user for ECS/Fargate
 RUN groupadd -r lde && useradd -r -g lde -d /app -s /sbin/nologin lde

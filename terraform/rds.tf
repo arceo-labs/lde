@@ -1,6 +1,6 @@
 module "aurora_postgresql" {
   source  = "terraform-aws-modules/rds-aurora/aws"
-  version = "~> 9.0"
+  version = "~> 10.4"
 
   name           = "${local.name_prefix}-dtrack"
   engine         = "aurora-postgresql"
