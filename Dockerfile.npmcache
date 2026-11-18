@@ -7,7 +7,7 @@
 # Usage: docker compose build npm-cache
 #        docker compose up -d npm-cache
 
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 USER root
 
